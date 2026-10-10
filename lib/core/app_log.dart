@@ -15,6 +15,8 @@ class AppLog {
   static final _lines = Queue<String>();
   static var _headerWritten = false;
   static IOSink? _sink;
+  static var _clientBurst = 0;
+  static DateTime? _clientBurstAt;
 
   static void i(String tag, String msg) => _add('I', tag, msg);
 
@@ -74,18 +76,47 @@ class AppLog {
   }
 
   static void _add(String level, String tag, String msg) {
+    // client/webview 异常刷屏会淹没 lifecycle，导出日志就只剩垃圾
+    if (tag == 'client' || (tag == 'webview' && msg.contains('CLIENT_ANOMALY'))) {
+      final now = DateTime.now();
+      if (_clientBurstAt == null ||
+          now.difference(_clientBurstAt!).inSeconds >= 3) {
+        _clientBurstAt = now;
+        _clientBurst = 0;
+      }
+      _clientBurst++;
+      if (_clientBurst > 12) return;
+    }
     final t = DateTime.now().toIso8601String();
     final line = '$t [$level][$tag] $msg';
-    _lines.add(line);
-    while (_lines.length > _cap) {
-      _lines.removeFirst();
+    // lifecycle/game 优先保留：满了先丢非关键行
+    if (_lines.length >= _cap &&
+        (tag == 'lifecycle' || tag == 'game' || tag == 'boot')) {
+      String? victim;
+      for (final e in _lines) {
+        if (!e.contains('[lifecycle]') &&
+            !e.contains('[game]') &&
+            !e.contains('[boot]')) {
+          victim = e;
+          break;
+        }
+      }
+      if (victim != null) {
+        _lines.remove(victim);
+      } else {
+        _lines.removeFirst();
+      }
+    } else {
+      while (_lines.length >= _cap) {
+        _lines.removeFirst();
+      }
     }
+    _lines.add(line);
     try {
       _sink?.writeln(line);
     } catch (_) {}
-    // release 也打关键诊断到控制台（Xcode / 控制台 App）；webview 刷屏除外
     final noisy = tag == 'webview' && !msg.contains('咸强之王');
-    if (!noisy && (kDebugMode || level == 'E' || level == 'D' || tag == 'game' || tag == 'boot')) {
+    if (!noisy && (kDebugMode || level == 'E' || level == 'D' || tag == 'game' || tag == 'boot' || tag == 'lifecycle')) {
       debugPrint('[咸强之王][$tag] $msg');
     }
   }

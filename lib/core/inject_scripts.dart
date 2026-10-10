@@ -332,23 +332,42 @@ class InjectScripts {
     }
     return out;
   }
+  var _repCount = 0;
+  var _repWindow = 0;
+  var _reporting = false;
   function report(kind, text, extra){
-    var key = hit(text);
-    if (!key && kind !== 'fingerprint') return;
-    var payload = {
-      type: 'clientAnomaly',
-      kind: kind,
-      key: key || '',
-      text: String(text || '').slice(0, 500),
-      fingerprint: fingerprint(),
-      extra: extra || null
-    };
-    console.error('[咸强之王][CLIENT_ANOMALY]', kind, key, String(text||'').slice(0, 180));
     try {
-      if (window.XyzwBridge && window.XyzwBridge.postMessage) {
-        window.XyzwBridge.postMessage(JSON.stringify(payload));
-      }
-    } catch (e) {}
+      var href = String(location.href || '');
+      // about:blank / 丢弃中的页不要报，否则会递归刷爆日志卡死主线程
+      if (href.indexOf('about:') === 0) return;
+      var raw = String(text || '');
+      if (raw.indexOf('[CLIENT_ANOMALY]') >= 0 || raw.indexOf('CLIENT_ANOMALY') >= 0) return;
+      if (_reporting) return;
+      var now = Date.now();
+      if (now - _repWindow > 3000) { _repWindow = now; _repCount = 0; }
+      if (_repCount >= 8) return;
+      var key = hit(text);
+      if (!key && kind !== 'fingerprint') return;
+      _repCount++;
+      _reporting = true;
+      var payload = {
+        type: 'clientAnomaly',
+        kind: kind,
+        key: key || '',
+        text: raw.slice(0, 500),
+        fingerprint: fingerprint(),
+        extra: extra || null
+      };
+      // 禁止再用 console.error，否则会再次命中 wrapConsole → 死循环
+      try {
+        if (window.XyzwBridge && window.XyzwBridge.postMessage) {
+          window.XyzwBridge.postMessage(JSON.stringify(payload));
+        }
+      } catch (e) {}
+    } catch (e2) {
+    } finally {
+      _reporting = false;
+    }
   }
   function wrapConsole(name){
     try {

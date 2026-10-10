@@ -346,13 +346,17 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
 
   Future<void> _resumeInGameSessions(int bgSec) async {
     AppLog.i('lifecycle', '游戏内回前台 ${bgSec}s，恢复会话 ${_sessions.length}');
+    // 先保证本地 HTTP，再动 WebView（日志里 -1004 / cc=false 都是服务先死）
     await _ensureLocalHttpForResume();
     if (!mounted) return;
+    if (_baseUrl == null || _server == null) {
+      AppLog.e('lifecycle', '回前台 HTTP 仍不可用，无法恢复在线');
+      return;
+    }
 
     final ids = _sessions.keys.toList(growable: false);
-    // iOS 挂起几十秒后 WKWebView/WS 基本已废；软 onShow 只会「挂住」。
-    // ≥25s：在游戏页内硬重建（不退回首页），重新加载并登录上线。
-    final forceHard = bgSec >= 25;
+    // iOS 挂起后 WKWebView/WS 基本已废。≥20s 在游戏页内硬重建并重新登录。
+    final forceHard = bgSec >= 20;
     for (final id in ids) {
       if (!mounted) return;
       final alive = forceHard ? false : await _probeSessionAlive(id);
@@ -375,24 +379,16 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
     if (ids.isEmpty) return;
     _httpSuspect = true;
     AppLog.w('lifecycle', '$reason: 同步丢弃 ${ids.length} 个会话');
-    final controllers = <WebViewController>[];
     for (final id in ids) {
       _readyTimers.remove(id)?.cancel();
       _binKeepAlive.remove(id)?.cancel();
       _injectChain.remove(id);
       _bootingIds.remove(id);
       _recoveringIds.remove(id);
-      final s = _sessions.remove(id);
-      if (s != null) controllers.add(s.controller);
+      _sessions.remove(id);
     }
     _staleSessionIds.clear();
-    for (final c in controllers) {
-      unawaited(() async {
-        try {
-          await c.loadRequest(Uri.parse('about:blank'));
-        } catch (_) {}
-      }());
-    }
+    // 故意不 about:blank，见 _dropSession
     if (mounted) setState(() {});
     _emitRunning();
   }
@@ -437,12 +433,9 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
     _binKeepAlive.remove(accountId)?.cancel();
     _injectChain.remove(accountId);
     _staleSessionIds.remove(accountId);
-    final s = _sessions.remove(accountId);
-    if (s != null) {
-      try {
-        await s.controller.loadRequest(Uri.parse('about:blank'));
-      } catch (_) {}
-    }
+    // 不要 load about:blank：日志已证明会触发 CLIENT_ANOMALY 死循环刷屏卡死。
+    // 移出树后 WKWebView 会随 Widget 释放；重建时直接 load 游戏 URL。
+    _sessions.remove(accountId);
   }
 
   Future<void> closeAccount(String accountId) async {
