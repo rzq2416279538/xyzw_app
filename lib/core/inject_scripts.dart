@@ -109,6 +109,161 @@ class InjectScripts {
 })();
 ''';
 
+  /// 盐场/蟠桃「点人」回归对照（和光/逆苍澜真因）：
+  /// 1) 本地域被出站钩子假 200 吞掉  2) manifest 的 isLast/force* 被钉死导致活动 bundle 不拉
+  /// 本壳无 outbound-hide / bin-login 钉 isLast，但仍记录这些字段与相关流量，便于真机对照。
+  static const pvpDiagWatch = r'''
+(function(){
+  if (window.__xyzwPvpDiag) return;
+  window.__xyzwPvpDiag = true;
+  function post(obj){
+    try {
+      if (window.XyzwBridge && window.XyzwBridge.postMessage) {
+        window.XyzwBridge.postMessage(JSON.stringify(obj));
+      }
+    } catch (e) {}
+  }
+  function log(){
+    try {
+      var args = Array.prototype.slice.call(arguments);
+      console.log.apply(console, ['[咸强之王][PVP_DIAG]'].concat(args));
+      post({ type: 'pvpDiag', level: 'I', message: args.map(String).join(' ') });
+    } catch (e) {}
+  }
+  function warn(){
+    try {
+      var args = Array.prototype.slice.call(arguments);
+      console.warn.apply(console, ['[咸强之王][PVP_DIAG]'].concat(args));
+      post({ type: 'pvpDiag', level: 'W', message: args.map(String).join(' ') });
+    } catch (e) {}
+  }
+  function isLocalFakeHost(host){
+    host = String(host || '').toLowerCase();
+    if (!host) return false;
+    if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return true;
+    if (host === 'local' || host === 'game.local' || host === 'ncl.local') return true;
+    if (/\.game\.local$/i.test(host) || /\.local$/i.test(host)) return true;
+    return false;
+  }
+  function interestingUrl(u){
+    var s = String(u || '').toLowerCase();
+    return /manifest|authuser|serverlist|salt|yanchang|peach|pantao|legion|pvp|battle|match|activity|miniGame|bundle/i.test(s);
+  }
+  function summarizeManifest(obj){
+    if (!obj || typeof obj !== 'object') return { parse: false };
+    var root = obj;
+    var data = obj.data || obj.rawData || obj;
+    var out = {
+      parse: true,
+      isLast: root.isLast,
+      data_isLast: data && data.isLast,
+      forceUpdate: root.forceUpdate != null ? root.forceUpdate : (data && data.forceUpdate),
+      forceVer: root.forceVer != null ? root.forceVer : (data && data.forceVer),
+      latestVer: root.latestVer != null ? root.latestVer : (data && data.latestVer),
+      battleVersion: root.battleVersion != null ? root.battleVersion : (data && data.battleVersion),
+      dataBundleVer: root.dataBundleVer || (data && data.dataBundleVer) || '',
+      dataVers: root.dataVers || (data && data.dataVers) || '',
+      serverUrl: root.serverUrl || (data && data.serverUrl) || '',
+      bundleVersType: typeof (root.bundleVers != null ? root.bundleVers : (data && data.bundleVers))
+    };
+    // 和光回归：钉 isLast=true + 清空 latestVer 会让盐场/蟠桃活动 bundle 不拉
+    out.risk_pinIsLast = (out.isLast === true || out.data_isLast === true);
+    out.risk_emptyLatest = (out.latestVer === '' || out.latestVer === null);
+    return out;
+  }
+  function inspectBody(url, text, tag){
+    var s = String(text || '');
+    if (!s) return;
+    var low = String(url || '').toLowerCase();
+    if (low.indexOf('manifest') >= 0 || /"isLast"\s*:/.test(s)) {
+      try {
+        var json = JSON.parse(s);
+        var sum = summarizeManifest(json);
+        log(tag, 'manifest', JSON.stringify(sum), 'url='+String(url).slice(0,160));
+        if (sum.risk_pinIsLast && sum.risk_emptyLatest) {
+          warn(tag, 'SUSPECT_MANIFEST_PIN isLast+emptyLatest（对照和光点人回归）');
+        }
+        post({ type: 'pvpDiag', level: 'D', event: 'manifest', summary: sum, url: String(url).slice(0,200) });
+      } catch (e) {
+        warn(tag, 'manifest非JSON', s.slice(0,120));
+      }
+    }
+  }
+  // —— fetch：记录本地域/比赛相关流量，绝不吞响应 ——
+  try {
+    var _fetch = window.fetch;
+    if (typeof _fetch === 'function' && !_fetch.__xyzwPvpWrapped) {
+      var wrapped = function(input, init){
+        var url = '';
+        var method = 'GET';
+        try {
+          url = (typeof input === 'string') ? input : (input && input.url) || '';
+          method = ((init && init.method) || (input && input.method) || 'GET').toUpperCase();
+        } catch (e) {}
+        var host = '';
+        try { host = new URL(String(url), location.href).hostname; } catch (e2) {}
+        if (isLocalFakeHost(host)) {
+          log('fetch-local-bypass', method, host, String(url).slice(0,160));
+        } else if (interestingUrl(url)) {
+          log('fetch', method, String(url).slice(0,180));
+        }
+        return _fetch.apply(this, arguments).then(function(res){
+          try {
+            if (interestingUrl(url) || /manifest/i.test(url)) {
+              var clone = res.clone();
+              clone.text().then(function(t){ inspectBody(url, t, 'fetch'); }).catch(function(){});
+            }
+          } catch (e3) {}
+          return res;
+        });
+      };
+      wrapped.__xyzwPvpWrapped = true;
+      window.fetch = wrapped;
+    }
+  } catch (e) {}
+  // —— XHR：同上 ——
+  try {
+    var XP = XMLHttpRequest && XMLHttpRequest.prototype;
+    if (XP && XP.open && !XP.__xyzwPvpXhr) {
+      XP.__xyzwPvpXhr = true;
+      var _open = XP.open;
+      var _send = XP.send;
+      XP.open = function(method, url){
+        this.__xyzwPvpUrl = String(url || '');
+        this.__xyzwPvpMethod = String(method || 'GET');
+        return _open.apply(this, arguments);
+      };
+      XP.send = function(){
+        var xhr = this;
+        var url = xhr.__xyzwPvpUrl || '';
+        var method = (xhr.__xyzwPvpMethod || 'GET').toUpperCase();
+        var host = '';
+        try { host = new URL(url, location.href).hostname; } catch (e) {}
+        if (isLocalFakeHost(host)) {
+          log('xhr-local-bypass', method, host, url.slice(0,160));
+        } else if (interestingUrl(url)) {
+          log('xhr', method, url.slice(0,180));
+        }
+        if (interestingUrl(url) || /manifest/i.test(url)) {
+          xhr.addEventListener('load', function(){
+            try { inspectBody(url, xhr.responseText, 'xhr'); } catch (e2) {}
+          });
+        }
+        return _send.apply(this, arguments);
+      };
+    }
+  } catch (e) {}
+  // 页面 origin / 本地域提示（对照：iOS 127.0.0.1 vs 自定义 scheme）
+  try {
+    log('origin', String(location.origin||''), 'href='+String(location.href||'').slice(0,160));
+    if (isLocalFakeHost(location.hostname)) {
+      log('page-on-local-fake-host', location.hostname, '（本地域流量必须直通，不可假200）');
+    }
+  } catch (e) {}
+  console.log('[咸强之王][PVP_DIAG] 盐场/蟠桃诊断已启动');
+})();
+''';
+
   /// 比赛/踢线常见「客户端数据异常」侦测：抓弹窗、toast、console，并上报指纹便于对照。
   static const clientAnomalyWatch = r'''
 (function(){
@@ -118,6 +273,7 @@ class InjectScripts {
     '客户端数据异常', '官方最新客户端', '请使用官方', '数据异常',
     '客户端异常', '版本过低', '强制更新', '登录失效', '异地登录',
     '连接已断开', '网络异常', '重新登录', '账号在其他', '被踢',
+    '盐场', '蟠桃', '点不了', 'RejectLowVersionPvP', '低版本',
     'client data', 'illegal client', 'official client'
   ];
   function hit(text){
@@ -894,10 +1050,14 @@ try {
         try {
             var u = new URL(String(url || ''), location.href);
             if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
-            if (u.hostname === 'localhost' || u.hostname === '127.0.0.1') return false;
+            var h = String(u.hostname || '').toLowerCase();
+            // 本地域 / 伪域必须直通（对照和光：吞掉 game.local 会导致盐场/蟠桃点不了人）
+            if (h === 'localhost' || h === '127.0.0.1' || h === '::1') return false;
+            if (h === 'local' || h === 'game.local' || h === 'ncl.local') return false;
+            if (/\.game\.local$/i.test(h) || /\.local$/i.test(h)) return false;
             // 游戏 CDN/API 本身可跨域，保持原生以免拖慢资源加载
-            if (/(^|\.)hortorgames\.com$/i.test(u.hostname)) return false;
-            if (/(^|\.)mars-face\.hortorgames\.com$/i.test(u.hostname)) return false;
+            if (/(^|\.)hortorgames\.com$/i.test(h)) return false;
+            if (/(^|\.)mars-face\.hortorgames\.com$/i.test(h)) return false;
             return true;
         } catch (e) { return false; }
     }

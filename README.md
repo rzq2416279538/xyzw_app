@@ -77,6 +77,7 @@ flutter run -d <iphone>
 3. 将日志发给开发者；优先搜索：  
    - 登录：`拦截XHR`、`BIN`、`roleId`  
    - 比赛踢线/客户端异常：`CLIENT_ANOMALY`、`[client]`、`客户端数据异常`、`fingerprint`  
+   - 盐场/蟠桃点人：`PVP_DIAG`、`[pvp]`、`manifest`、`isLast`、`SUSPECT_MANIFEST_PIN`、`fetch-local-bypass`  
 
 ## 无自有服务器时的「在线更新」
 

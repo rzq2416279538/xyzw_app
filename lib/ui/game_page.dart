@@ -317,12 +317,20 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
             text.contains('官方最新客户端') ||
             text.contains('客户端异常') ||
             text.contains('数据异常');
+        final pvp = text.contains('PVP_DIAG') ||
+            text.contains('SUSPECT_MANIFEST_PIN') ||
+            text.contains('盐场') ||
+            text.contains('蟠桃') ||
+            text.contains('isLast') ||
+            text.contains('RejectLowVersionPvP');
         final important = anomaly ||
+            pvp ||
             text.contains('咸强之王') ||
             text.contains('BIN') ||
             text.contains('拦截') ||
             text.contains('lifecycle') ||
             text.contains('login') ||
+            text.contains('manifest') ||
             text.contains('WebSocket') ||
             text.contains('踢') ||
             m.level == JavaScriptLogLevel.error ||
@@ -361,6 +369,7 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
               await controller.runJavaScript(
                 '${InjectScripts.vhFix}\n${InjectScripts.canvasGuard}\n'
                 '${InjectScripts.clientAnomalyWatch}\n'
+                '${InjectScripts.pvpDiagWatch}\n'
                 '${InjectScripts.lateSdkReady}\nwindow.__xyzwRoleBridge=false;\n'
                 '${InjectScripts.roleBridge}\n${InjectScripts.gameReadyWatch}',
               );
@@ -588,7 +597,8 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
     // xhrIntercept / 异常侦测自身幂等；页面重建后标志丢失会自动重装
     await controller.runJavaScript(
       '${InjectScripts.compat}\n${InjectScripts.xhrIntercept}\n'
-      '${InjectScripts.clientAnomalyWatch}',
+      '${InjectScripts.clientAnomalyWatch}\n'
+      '${InjectScripts.pvpDiagWatch}',
     );
 
     // iOS：优先 Dart→base64 灌入缓冲；HTTP 拉取作备用
@@ -679,6 +689,29 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
             'key': key,
             'text': text,
             'fp': fp,
+          });
+        }
+        return;
+      }
+      if (type == 'pvpDiag') {
+        final level = map['level'] as String? ?? 'I';
+        final msg = map['message'] as String? ?? '';
+        final event = map['event'] as String? ?? '';
+        final summary = map['summary'];
+        final url = map['url'] as String? ?? '';
+        final line = '[$accountId] ${event.isEmpty ? msg : '$event $msg'}'
+            '${url.isEmpty ? '' : ' url=$url'}'
+            '${summary == null ? '' : ' summary=$summary'}';
+        if (level == 'W' || level == 'E') {
+          AppLog.w('pvp', line);
+        } else {
+          AppLog.diag('pvp', {
+            'accountId': accountId,
+            'event': event.isEmpty ? 'msg' : event,
+            'level': level,
+            'message': msg,
+            'url': url,
+            'summary': summary,
           });
         }
         return;
