@@ -102,25 +102,26 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _ensureHttpAlive() async {
-    final http = _http;
     final dir = _rendererDir;
-    if (http == null || dir == null || http.port == 0) return;
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 2);
-    try {
-      final req = await client.getUrl(Uri.parse('${http.baseUrl}/'));
-      req.followRedirects = false;
-      final res = await req.close().timeout(const Duration(seconds: 2));
-      await res.drain<void>();
-      if (res.statusCode > 0) return;
-    } catch (e) {
-      AppLog.w('lifecycle', '首页 HTTP 探活失败: $e');
-    } finally {
-      client.close(force: true);
+    if (dir == null) return;
+    var http = _http;
+    if (http != null) {
+      final ok = await http.ping();
+      if (ok) {
+        AppLog.diag('lifecycle', {
+          'event': 'http_ping',
+          'ok': true,
+          'port': http.port,
+        });
+        return;
+      }
+      AppLog.w('lifecycle', '首页 HTTP 探活失败 port=${http.port}，重启');
+      try {
+        await http.stop();
+      } catch (_) {}
+    } else {
+      AppLog.w('lifecycle', '首页 HTTP 为空，启动');
     }
-    AppLog.w('lifecycle', '首页 HTTP 已死，重启本地服务');
-    try {
-      await http.stop();
-    } catch (_) {}
     final next = LocalHttpServer(dir);
     final url = await next.start();
     if (!mounted) {
@@ -133,7 +134,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       return;
     }
     setState(() => _http = next);
-    AppLog.i('lifecycle', '首页 HTTP 已重启: $url');
+    AppLog.i('lifecycle', '首页 HTTP 已就绪: $url');
+    // 端口可能变了，再暖一次关键资源（走磁盘/新 origin 缓存）
+    unawaited(RendererWarmup.prefetch(url, dir));
   }
 
   void _onStore() => setState(() {});

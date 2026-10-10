@@ -30,8 +30,30 @@ class LocalHttpServer {
     return safe.isEmpty ? 'account' : safe;
   }
 
+  /// 真正探活：后台久了 isolate 可能已死，但 [port] 仍非 0。
+  Future<bool> ping() async {
+    if (port == 0) return false;
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 2);
+    try {
+      final req = await client.getUrl(Uri.parse('$baseUrl/'));
+      req.followRedirects = false;
+      final res = await req.close().timeout(const Duration(seconds: 2));
+      await res.drain<void>();
+      return res.statusCode > 0;
+    } catch (_) {
+      return false;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
   Future<String?> start() async {
-    if (port != 0) return baseUrl;
+    // 旧逻辑 `port != 0` 直接返回会在 isolate 已死后假装还活着 → WKWebView -1004 白屏
+    if (port != 0) {
+      if (await ping()) return baseUrl;
+      debugPrint('[咸强之王-HTTP] 端口 $port 无响应，重建');
+      await stop();
+    }
     if (!await rootDir.exists()) {
       debugPrint('[咸强之王-HTTP] 目录不存在: ${rootDir.path}');
       return null;

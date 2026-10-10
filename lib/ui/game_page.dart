@@ -148,21 +148,11 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
   }
 
   Future<bool> _httpAlive() async {
-    final base = _baseUrl;
-    if (base == null || base.isEmpty) return false;
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 2);
-    try {
-      final req = await client.getUrl(Uri.parse('$base/'));
-      req.followRedirects = false;
-      final res = await req.close().timeout(const Duration(seconds: 2));
-      await res.drain<void>();
-      return res.statusCode > 0;
-    } catch (e) {
-      AppLog.w('lifecycle', '本地 HTTP 探活失败: $e');
-      return false;
-    } finally {
-      client.close(force: true);
-    }
+    final s = _server;
+    if (s == null) return false;
+    final ok = await s.ping();
+    if (!ok) AppLog.w('lifecycle', '本地 HTTP 探活失败 port=${s.port}');
+    return ok;
   }
 
   Future<void> _bootServerAndOpen(String accountId) async {
@@ -190,15 +180,12 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
 
     if (_server == null) {
       final existing = widget.httpServer;
-      if (existing != null && existing.port != 0) {
-        _server = existing;
-        _ownsServer = false;
-        _baseUrl = existing.baseUrl;
-        if (!await _httpAlive()) {
-          AppLog.w('lifecycle', '共享 HTTP 不可用，自建服务');
-          _server = null;
-          _baseUrl = null;
+      if (existing != null) {
+        final url = await existing.start(); // start 内含 ping，死了会重建
+        if (url != null) {
+          _server = existing;
           _ownsServer = false;
+          _baseUrl = url;
         }
       }
       if (_server == null) {
@@ -373,6 +360,23 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
     }
   }
 
+  Future<void> _recoverDeadHttp(String accountId) async {
+    if (_recoveringIds.contains(accountId) || _bootingIds.contains(accountId)) {
+      return;
+    }
+    AppLog.w('lifecycle', '主文档无法连接本地 HTTP，重建后重开 $accountId');
+    _httpSuspect = true;
+    if (_ownsServer) {
+      try {
+        await _server?.stop();
+      } catch (_) {}
+    }
+    _server = null;
+    _baseUrl = null;
+    _ownsServer = false;
+    await restartAccount(accountId);
+  }
+
   Future<void> _ensureSession(String accountId) async {
     // 注意：不要用 _recoveringIds 挡这里，restartAccount 正是靠本方法新建 WebView
     if (_bootingIds.contains(accountId)) {
@@ -510,19 +514,28 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
           },
           onWebResourceError: (err) {
             final url = err.url ?? '';
-            final interesting = (err.isForMainFrame ?? false) ||
+            final main = err.isForMainFrame ?? false;
+            final interesting = main ||
                 url.contains('__xyzw/bin') ||
                 url.contains('login') ||
                 url.contains('hortorgames');
             if (interesting) {
               AppLog.diag('game', {
                 'event': 'resource_error',
-                'mainFrame': err.isForMainFrame,
+                'mainFrame': main,
                 'code': err.errorCode,
                 'type': err.errorType?.name,
                 'desc': err.description,
                 'url': url,
               });
+            }
+            // iOS -1004：本地 HTTP 已死，立刻重建服务并重载（日志里白屏就是这个）
+            final deadLocal = main &&
+                (err.errorCode == -1004 ||
+                    err.description.contains('无法连接') ||
+                    err.description.contains('Could not connect'));
+            if (deadLocal) {
+              unawaited(_recoverDeadHttp(accountId));
             }
           },
           onHttpError: (err) {
