@@ -31,17 +31,18 @@ jobs:
           cache: true
 
       - name: Flutter pub get
-        run: flutter pub get
+        run: |
+          flutter pub get
+          flutter precache --ios
 
       - name: CocoaPods
         working-directory: ios
         run: |
-          pod repo update --silent || true
-          pod install
+          test -f Podfile
+          pod install --repo-update
 
       - name: Build iOS release (no codesign)
-        run: |
-          flutter build ios --release --no-codesign
+        run: flutter build ios --release --no-codesign
 
       - name: Pack unsigned IPA
         run: |
