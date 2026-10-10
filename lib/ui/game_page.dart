@@ -273,7 +273,7 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
       });
       unawaited(IosBgKeep.end());
       if (wasPlaying && _sessions.isNotEmpty) {
-        // 回前台仍在游戏：保活 HTTP + 触发 onShow/重连，不拆 WebView
+        // 回前台仍停在游戏页；后台久了必须硬重建才能重新上线（软 JS 救不了挂死）
         unawaited(_resumeInGameSessions(sec));
       } else if (sec >= 8 && !widget.visible && _sessions.isNotEmpty) {
         _httpSuspect = true;
@@ -282,42 +282,91 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _resumeInGameSessions(int bgSec) async {
-    AppLog.i('lifecycle', '游戏内回前台 ${bgSec}s，恢复会话 ${_sessions.length}');
+  Future<void> _ensureLocalHttpForResume() async {
     _httpSuspect = true;
-    // 只探活/重启本地 HTTP，不销毁 WebView（资源已在内存，远程 WS 靠 onShow 重连）
-    if (_server != null && !await _httpAlive()) {
-      AppLog.w('lifecycle', '游戏内回前台时本地 HTTP 已死，重建服务（不重载页）');
-      if (_ownsServer) {
-        try {
-          await _server?.stop();
-        } catch (_) {}
+    if (_server != null && await _httpAlive()) {
+      _httpSuspect = false;
+      return;
+    }
+    AppLog.w('lifecycle', '回前台本地 HTTP 不可用，重建');
+    if (_ownsServer) {
+      try {
+        await _server?.stop();
+      } catch (_) {}
+    }
+    _server = null;
+    _baseUrl = null;
+    _ownsServer = false;
+    final existing = widget.httpServer;
+    if (existing != null) {
+      final url = await existing.start();
+      if (url != null) {
+        _server = existing;
+        _baseUrl = url;
+        _httpSuspect = false;
+        return;
       }
-      _server = null;
-      _baseUrl = null;
-      _ownsServer = false;
-      final existing = widget.httpServer;
-      if (existing != null) {
-        final url = await existing.start();
-        if (url != null) {
-          _server = existing;
-          _baseUrl = url;
-        }
-      }
-      if (_server == null) {
-        final server = LocalHttpServer(widget.rendererDir);
-        final url = await server.start();
-        if (url != null) {
-          _server = server;
-          _ownsServer = true;
-          _baseUrl = url;
-        }
-      }
-    } else {
+    }
+    final server = LocalHttpServer(widget.rendererDir);
+    final url = await server.start();
+    if (url != null) {
+      _server = server;
+      _ownsServer = true;
+      _baseUrl = url;
       _httpSuspect = false;
     }
-    for (final id in _sessions.keys.toList(growable: false)) {
-      await _pingSession(id, 'foreground_resume');
+  }
+
+  Future<bool> _probeSessionAlive(String id) async {
+    final c = _sessions[id]?.controller;
+    if (c == null) return false;
+    try {
+      final raw = await c
+          .runJavaScriptReturningResult(r'''
+(function(){
+  try {
+    if (!window.cc || !cc.game) return 'no_cc';
+    var paused = false;
+    try {
+      if (typeof cc.game.isPaused === 'function') paused = !!cc.game.isPaused();
+    } catch (e0) {}
+    return paused ? 'paused' : 'ok';
+  } catch (e) { return 'err'; }
+})()
+''')
+          .timeout(const Duration(seconds: 2));
+      final s = raw.toString().replaceAll('"', '');
+      AppLog.diag('lifecycle', {'event': 'probe_session', 'id': id, 'result': s});
+      return s == 'ok' || s == 'paused';
+    } catch (e) {
+      AppLog.w('lifecycle', 'probe_session 失败 $id: $e');
+      return false;
+    }
+  }
+
+  Future<void> _resumeInGameSessions(int bgSec) async {
+    AppLog.i('lifecycle', '游戏内回前台 ${bgSec}s，恢复会话 ${_sessions.length}');
+    await _ensureLocalHttpForResume();
+    if (!mounted) return;
+
+    final ids = _sessions.keys.toList(growable: false);
+    // iOS 挂起几十秒后 WKWebView/WS 基本已废；软 onShow 只会「挂住」。
+    // ≥25s：在游戏页内硬重建（不退回首页），重新加载并登录上线。
+    final forceHard = bgSec >= 25;
+    for (final id in ids) {
+      if (!mounted) return;
+      final alive = forceHard ? false : await _probeSessionAlive(id);
+      if (!alive) {
+        AppLog.w(
+          'lifecycle',
+          forceHard
+              ? '后台 ${bgSec}s，硬重建 $id 以恢复在线'
+              : '会话已死，硬重建 $id',
+        );
+        await restartAccount(id);
+      } else {
+        await _pingSession(id, 'foreground_resume');
+      }
     }
   }
 
