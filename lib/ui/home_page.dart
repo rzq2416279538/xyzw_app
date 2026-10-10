@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
@@ -31,7 +32,7 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
+class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Directory? _rendererDir;
   LocalHttpServer? _http;
   RendererStatus? _status;
@@ -47,20 +48,92 @@ class _HomePageState extends State<HomePage> {
   String? _gameInitialId;
   final _running = <String>{};
   Account? _menuAccount;
+  DateTime? _backgroundedAt;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     widget.store.addListener(_onStore);
     _init();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     widget.store.removeListener(_onStore);
     _searchCtrl.dispose();
     _http?.stop();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // paused/hidden：真正进后台。inactive 会在控制中心等场景误触发，不能拆页。
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden) {
+      _backgroundedAt ??= DateTime.now();
+      // 关游戏回首页后再进后台：Offstage 里的 WKWebView 必挂，
+      // 再进游戏会出现长时间加载后白屏。这里直接卸掉整个 GamePage。
+      if (!_gameVisible && _gameMounted) {
+        AppLog.w('lifecycle', '后台且游戏已关闭，卸载 GamePage（防白屏）');
+        setState(() {
+          _gameMounted = false;
+          _gameInitialId = null;
+          _running.clear();
+        });
+      }
+      return;
+    }
+    if (state == AppLifecycleState.resumed) {
+      final bg = _backgroundedAt;
+      _backgroundedAt = null;
+      final sec = bg == null ? 0 : DateTime.now().difference(bg).inSeconds;
+      AppLog.diag('lifecycle', {
+        'event': 'home_resumed',
+        'sec': sec,
+        'gameVisible': _gameVisible,
+        'gameMounted': _gameMounted,
+      });
+      if (sec >= 8) {
+        unawaited(_ensureHttpAlive());
+      }
+    }
+  }
+
+  Future<void> _ensureHttpAlive() async {
+    final http = _http;
+    final dir = _rendererDir;
+    if (http == null || dir == null || http.port == 0) return;
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 2);
+    try {
+      final req = await client.getUrl(Uri.parse('${http.baseUrl}/'));
+      req.followRedirects = false;
+      final res = await req.close().timeout(const Duration(seconds: 2));
+      await res.drain<void>();
+      if (res.statusCode > 0) return;
+    } catch (e) {
+      AppLog.w('lifecycle', '首页 HTTP 探活失败: $e');
+    } finally {
+      client.close(force: true);
+    }
+    AppLog.w('lifecycle', '首页 HTTP 已死，重启本地服务');
+    try {
+      await http.stop();
+    } catch (_) {}
+    final next = LocalHttpServer(dir);
+    final url = await next.start();
+    if (!mounted) {
+      await next.stop();
+      return;
+    }
+    if (url == null) {
+      AppLog.e('lifecycle', '首页 HTTP 重启失败');
+      setState(() => _http = null);
+      return;
+    }
+    setState(() => _http = next);
+    AppLog.i('lifecycle', '首页 HTTP 已重启: $url');
   }
 
   void _onStore() => setState(() {});
@@ -195,6 +268,9 @@ class _HomePageState extends State<HomePage> {
       final ok = await IosNetworkGate.ensureReady(context);
       if (!ok || !mounted) return;
     }
+    // 进游戏前确保本地 HTTP 可用（后台久了 isolate 可能已死）
+    await _ensureHttpAlive();
+    if (!mounted) return;
     AppLog.diag('ui', {
       'event': 'start_game',
       'accountId': accountId,
@@ -216,7 +292,7 @@ class _HomePageState extends State<HomePage> {
       });
       return;
     }
-    // 先显示游戏层再 open：后台恢复时要销毁重建 WebView，需挂在树上
+    // 先显示游戏层再 open
     setState(() => _gameVisible = true);
     await Future<void>.delayed(Duration.zero);
     await _gameKey.currentState?.openAccount(accountId);

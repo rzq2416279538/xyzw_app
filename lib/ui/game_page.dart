@@ -171,8 +171,8 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
       return;
     }
 
-    // 后台回来后 isolate 偶发已死，端口号还在 → 先探活再决定是否重建
-    if (_server != null && _httpSuspect) {
+    // 后台回来后 isolate 偶发已死，端口号还在 → 每次开机都探活
+    if (_server != null) {
       if (!await _httpAlive()) {
         AppLog.w('lifecycle', '本地 HTTP 已死，重建服务');
         if (_ownsServer) {
@@ -195,10 +195,10 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
         _ownsServer = false;
         _baseUrl = existing.baseUrl;
         if (!await _httpAlive()) {
-          // home 传来的也死了：自己再起一份
           AppLog.w('lifecycle', '共享 HTTP 不可用，自建服务');
           _server = null;
           _baseUrl = null;
+          _ownsServer = false;
         }
       }
       if (_server == null) {
@@ -227,6 +227,12 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
     for (var i = 0; i < 80 && _recoveringIds.contains(accountId); i++) {
       await Future<void>.delayed(const Duration(milliseconds: 50));
     }
+    // 从首页再进：若仍挂着旧会话（后台未卸干净），强制冷启动，禁止复用
+    if (_sessions.containsKey(accountId) &&
+        (_httpSuspect || _staleSessionIds.contains(accountId))) {
+      AppLog.w('game', 'openAccount 冷启动，丢弃旧会话 $accountId');
+      _discardAllSessionsSync('open_cold');
+    }
     await _bootServerAndOpen(accountId);
   }
 
@@ -243,6 +249,13 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
         state == AppLifecycleState.hidden ||
         state == AppLifecycleState.inactive) {
       _backgroundedAt ??= DateTime.now();
+      // 已关游戏时由 HomePage 卸载整页；此处同步清会话，避免竞态复用死 WebView
+      if ((state == AppLifecycleState.paused ||
+              state == AppLifecycleState.hidden) &&
+          !widget.visible &&
+          _sessions.isNotEmpty) {
+        _discardAllSessionsSync('background_while_minimized');
+      }
       return;
     }
     if (state == AppLifecycleState.resumed) {
@@ -255,27 +268,38 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
         'gameVisible': widget.visible,
         'sessions': _sessions.length,
       });
-      // 复现差异：
-      // - 停在游戏内后台再回：画面正常，不要动
-      // - 先关游戏(Offstage)再后台：会话已死；此时重建会在不可见时加载→白屏
-      //   正确做法：直接丢掉死会话，等用户再次进入时在可见状态下新建
-      if (sec >= 8 && !widget.visible && _sessions.isNotEmpty) {
+      if (sec >= 8 && !widget.visible) {
         _httpSuspect = true;
-        final ids = _sessions.keys.toList(growable: false);
-        AppLog.w(
-          'lifecycle',
-          '后台 ${sec}s 且游戏已关闭，丢弃 ${ids.length} 个 Offstage 会话',
-        );
-        unawaited(_purgeSessionsForResume(ids));
+        if (_sessions.isNotEmpty) {
+          _discardAllSessionsSync('resume_minimized_${sec}s');
+        }
       }
     }
   }
 
-  Future<void> _purgeSessionsForResume(List<String> ids) async {
+  void _discardAllSessionsSync(String reason) {
+    final ids = _sessions.keys.toList(growable: false);
+    if (ids.isEmpty) return;
+    _httpSuspect = true;
+    AppLog.w('lifecycle', '$reason: 同步丢弃 ${ids.length} 个会话');
+    final controllers = <WebViewController>[];
     for (final id in ids) {
-      await _dropSession(id);
+      _readyTimers.remove(id)?.cancel();
+      _binKeepAlive.remove(id)?.cancel();
+      _injectChain.remove(id);
+      _bootingIds.remove(id);
+      _recoveringIds.remove(id);
+      final s = _sessions.remove(id);
+      if (s != null) controllers.add(s.controller);
     }
     _staleSessionIds.clear();
+    for (final c in controllers) {
+      unawaited(() async {
+        try {
+          await c.loadRequest(Uri.parse('about:blank'));
+        } catch (_) {}
+      }());
+    }
     if (mounted) setState(() {});
     _emitRunning();
   }
