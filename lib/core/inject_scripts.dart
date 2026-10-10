@@ -415,8 +415,80 @@ class InjectScripts {
 })();
 ''';
 
+  /// 应用内切号时，阻止 Page Visibility / Cocos 把后台会话暂停。
+  /// （切到别的 App 仍受 iOS 进程挂起限制，壳无法对抗。）
+  static const visibilityKeepAlive = r'''
+(function(){
+  if (window.__xyzwVisKeep) return;
+  window.__xyzwVisKeep = true;
+  function freezeVis(){
+    try {
+      var props = ['hidden','webkitHidden','mozHidden','msHidden'];
+      props.forEach(function(p){
+        try {
+          Object.defineProperty(document, p, { configurable: true, get: function(){ return false; }});
+        } catch (e) {}
+      });
+      try {
+        Object.defineProperty(document, 'visibilityState', {
+          configurable: true,
+          get: function(){ return 'visible'; }
+        });
+      } catch (e2) {}
+    } catch (e) {}
+  }
+  freezeVis();
+  function eat(e){
+    try { e.stopImmediatePropagation(); e.preventDefault(); } catch (err) {}
+  }
+  ['visibilitychange','webkitvisibilitychange','mozvisibilitychange',
+   'msvisibilitychange','qbrowserVisibilityChange','pagehide','freeze'].forEach(function(n){
+    window.addEventListener(n, eat, true);
+    document.addEventListener(n, eat, true);
+  });
+  function keepCocos(){
+    try {
+      var g = window.cc && cc.game;
+      if (g && typeof g.resume === 'function') {
+        if (typeof g.isPaused === 'function' ? g.isPaused() : false) {
+          g.resume();
+          console.log('[咸强之王][keepalive] cc.game.resume');
+        }
+      }
+    } catch (e) {}
+  }
+  function hookPause(){
+    try {
+      var g = window.cc && cc.game;
+      if (!g || g.__xyzwPauseHook || typeof g.pause !== 'function') return !!g && !!g.__xyzwPauseHook;
+      var _pause = g.pause.bind(g);
+      g.pause = function(){
+        console.log('[咸强之王][keepalive] 忽略 cc.game.pause（保活后台活动）');
+        try { freezeVis(); } catch (e) {}
+        setTimeout(keepCocos, 0);
+      };
+      g.__xyzwPauseHook = true;
+      g.__xyzwOrigPause = _pause;
+      return true;
+    } catch (e) { return false; }
+  }
+  if (!hookPause()) {
+    var n = 0;
+    var iv = setInterval(function(){
+      if (hookPause() || ++n > 160) clearInterval(iv);
+    }, 400);
+  }
+  setInterval(function(){
+    freezeVis();
+    keepCocos();
+  }, 4000);
+  console.log('[咸强之王][keepalive] 可见性冻结已安装');
+})();
+''';
+
   /// 全局错误吞噬 + 安全剪贴板 + execCommand 兜底
   static const compat = r'''
+
 (function(){
     if(window.__compatInstalled) return;
     window.__compatInstalled = true;

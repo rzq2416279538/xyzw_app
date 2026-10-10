@@ -194,7 +194,7 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
   void _armSessionHeartbeat() {
     _sessionHeartbeat?.cancel();
     // 非前台会话也定时探活，减轻 iOS 对后台 WKWebView 的冻结感
-    _sessionHeartbeat = Timer.periodic(const Duration(seconds: 25), (_) {
+    _sessionHeartbeat = Timer.periodic(const Duration(seconds: 8), (_) {
       if (!mounted || _sessions.isEmpty) return;
       unawaited(_pingAllSessions('heartbeat'));
     });
@@ -208,13 +208,13 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
         await c.runJavaScript('''
 (function(){
   try {
-    console.log('[咸强之王][keepalive] $reason id=$id vis='+(document.visibilityState||'')+
-      ' hidden='+!!document.hidden+
-      ' hasBuf='+!!(window.__activeBinBuf&&window.__activeBinBuf.byteLength)+
-      ' xhr='+!!window.__xhrIntercepted);
-    if (typeof window.__xyzwClientWatch === 'undefined') {
-      // 页面若被系统回收过脚本，由下次 pageFinished 再装；此处不强制 reload
+    if (window.cc && cc.game && typeof cc.game.resume === 'function') {
+      try {
+        if (typeof cc.game.isPaused === 'function' && cc.game.isPaused()) cc.game.resume();
+      } catch (e0) { try { cc.game.resume(); } catch (e1) {} }
     }
+    console.log('[咸强之王][keepalive] $reason id=$id vis='+(document.visibilityState||'')+
+      ' hidden='+!!document.hidden+' paused='+(window.cc&&cc.game&&cc.game.isPaused&&cc.game.isPaused()));
   } catch (e) {}
 })();
 ''');
@@ -368,6 +368,7 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
               await _queueInject(accountId, controller, account, 'page_finished');
               await controller.runJavaScript(
                 '${InjectScripts.vhFix}\n${InjectScripts.canvasGuard}\n'
+                '${InjectScripts.visibilityKeepAlive}\n'
                 '${InjectScripts.clientAnomalyWatch}\n'
                 '${InjectScripts.pvpDiagWatch}\n'
                 '${InjectScripts.lateSdkReady}\nwindow.__xyzwRoleBridge=false;\n'
@@ -597,6 +598,7 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
     // xhrIntercept / 异常侦测自身幂等；页面重建后标志丢失会自动重装
     await controller.runJavaScript(
       '${InjectScripts.compat}\n${InjectScripts.xhrIntercept}\n'
+      '${InjectScripts.visibilityKeepAlive}\n'
       '${InjectScripts.clientAnomalyWatch}\n'
       '${InjectScripts.pvpDiagWatch}',
     );
@@ -1074,14 +1076,46 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
     }
 
     final ids = _sessions.keys.toList();
-    final index = ids.indexOf(_activeId);
 
-    return IndexedStack(
-      index: index < 0 ? 0 : index,
-      sizing: StackFit.expand,
-      children: [
-        for (final id in ids) _sessionView(_sessions[id]!),
-      ],
+    // IndexedStack 不绘制未选中页 → iOS 会冻 WKWebView（活动停在切走时的进度）。
+    // 后台号仍按游戏区全尺寸布局，只露出 3px 以免被合成器剔除。
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final w = constraints.maxWidth;
+        final h = constraints.maxHeight;
+        return Stack(
+          fit: StackFit.expand,
+          clipBehavior: Clip.hardEdge,
+          children: [
+            for (final id in ids)
+              if (id == _activeId)
+                Positioned.fill(child: _sessionView(_sessions[id]!))
+              else
+                Positioned(
+                  left: 0,
+                  top: 0,
+                  width: 3,
+                  height: 3,
+                  child: ClipRect(
+                    child: OverflowBox(
+                      alignment: Alignment.topLeft,
+                      minWidth: w,
+                      maxWidth: w,
+                      minHeight: h,
+                      maxHeight: h,
+                      child: SizedBox(
+                        width: w,
+                        height: h,
+                        child: IgnorePointer(
+                          child: _sessionView(_sessions[id]!),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+          ],
+        );
+      },
     );
   }
 
