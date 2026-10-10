@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>雪碧助手</title>
+    <meta
+      name="viewport"
+      content="width=device-width,user-scalable=no,initial-scale=1, minimum-scale=1,maximum-scale=1"
+    />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta
+      name="apple-mobile-web-app-status-bar-style"
+      content="black-translucent"
+    />
+    <meta name="format-detection" content="telephone=no" />
+
+    <!-- force webkit on 360 -->
+    <meta name="renderer" content="webkit" />
+    <meta name="force-rendering" content="webkit" />
+    <!-- force edge on IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+    <meta name="msapplication-tap-highlight" content="no" />
+
+    <!-- force full screen on some browser -->
+    <meta name="full-screen" content="yes" />
+    <meta name="x5-fullscreen" content="true" />
+    <meta name="360-fullscreen" content="true" />
+
+    <!-- force screen orientation on some browser -->
+    <meta name="screen-orientation" content="portrait" />
+    <meta name="x5-orientation" content="portrait" />
+
+    <!--fix fireball/issues/3568 -->
+    <!--<meta name="browsermode" content="application">-->
+    <meta name="x5-page-mode" content="app" />
+    <!-- 禁用referrer -->
+    <meta name="referrer" content="no-referrer" />
+
+    <!--<link rel="apple-touch-icon" href=".png" />-->
+    <!--<link rel="apple-touch-icon-precomposed" href=".png" />-->
+
+    <link rel="stylesheet" type="text/css" href="style-mobile.1777a.css" />
+    <!-- 修正脚本面板显示：必须放在 style-mobile 之后才能覆盖 body 的 flex -->
+    <link rel="stylesheet" type="text/css" href="naiwa-uifix.css" />
+    <link rel="icon" href="favicon.8de18.ico" />
+  </head>
+  <body>
+    <script type="text/javascript">var unsafeWindow = window;</script>
+    <canvas
+      id="GameCanvas"
+      oncontextmenu="event.preventDefault()"
+      tabindex="0"
+    ></canvas>
+    <div id="splash">
+      <div class="progress-bar stripes">
+        <span style="width: 0%"></span>
+      </div>
+    </div>
+    <!-- 引入patch.js 解决版本缺少patch补丁的问题 -->
+    <script src="patch.js" charset="utf-8"></script>
+    <!-- 引入cocos-bundle-patch.js 解决index.jsc 的 XXTEA 解密下载问题 -->
+    <script src="cocos-bundle-patch.js" charset="utf-8"></script>
+    <!-- 引入hsdk-mock.js 解决安卓版本缺少patch补丁的问题 -->
+    <script src="hsdk-mock.js" charset="utf-8"></script>
+    <!-- 引入shanghaiqi.js 用于网页版登录账号测试,app端不使用 -->
+    <!-- <script src="shanghaiqi.js" charset="utf-8"></script> -->
+    <script src="src/settings.da7ef.js" charset="utf-8"></script>
+    <script src="game-defines.a175e.js" charset="utf-8"></script>
+    <script src="main.2a00e.js" charset="utf-8"></script>
+    <script src="cocos2d-js-min.a5841.js" charset="utf-8"></script>
+    <script type="text/javascript">
+      (function () {
+        window.HtmlIsLoaded = true;
+        var splash = document.getElementById("splash");
+        splash.style.display = "none";
+        window.boot();
+      })();
+    </script>
+  </body>
+</html>

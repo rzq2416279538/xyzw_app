@@ -1,0 +1,827 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:webview_flutter/webview_flutter.dart';
+import 'package:webview_flutter_android/webview_flutter_android.dart';
+
+import '../core/app_log.dart';
+import '../core/inject_scripts.dart';
+import '../core/local_http_server.dart';
+import '../core/renderer_status.dart';
+import '../core/script_cache.dart';
+import '../data/account.dart';
+import '../data/account_store.dart';
+import '../data/role_avatar_cache.dart';
+import '../data/script_store.dart';
+import 'app_theme.dart';
+import 'ios_chrome.dart';
+import 'net_avatar.dart';
+
+/// 游戏壳：实色顶栏 + 多账号会话（已进入的账号切换不销毁 WebView）。
+class GamePage extends StatefulWidget {
+  const GamePage({
+    super.key,
+    required this.store,
+    required this.scripts,
+    required this.initialAccountId,
+    required this.rendererDir,
+    required this.status,
+    required this.onBack,
+    this.onRunningChanged,
+    this.httpServer,
+  });
+
+  final AccountStore store;
+  final ScriptStore scripts;
+  final String initialAccountId;
+  final Directory rendererDir;
+  final RendererStatus status;
+  final VoidCallback onBack;
+  final ValueChanged<Set<String>>? onRunningChanged;
+  final LocalHttpServer? httpServer;
+
+  @override
+  State<GamePage> createState() => GamePageState();
+}
+
+class _Session {
+  _Session({required this.accountId, required this.controller});
+
+  final String accountId;
+  final WebViewController controller;
+  bool loading = true;
+  String? error;
+}
+
+class GamePageState extends State<GamePage> {
+  LocalHttpServer? _server;
+  var _ownsServer = false;
+  String? _baseUrl;
+  String? _bootError;
+  late String _activeId;
+  final Map<String, _Session> _sessions = {};
+  final Set<String> _bootingIds = {};
+  Future<void> _publishChain = Future<void>.value();
+  var _scriptsReady = false;
+  final Map<String, Timer> _readyTimers = {};
+
+  @override
+  void initState() {
+    super.initState();
+    _activeId = widget.initialAccountId;
+    widget.scripts.addListener(_onScripts);
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    SystemChrome.setSystemUIOverlayStyle(
+      const SystemUiOverlayStyle(
+        statusBarColor: Colors.transparent,
+        statusBarIconBrightness: Brightness.dark,
+        systemNavigationBarColor: Colors.black,
+        systemNavigationBarIconBrightness: Brightness.light,
+      ),
+    );
+    _bootServerAndOpen(_activeId);
+  }
+
+  void _onScripts() {
+    if (mounted) setState(() {});
+    _publishScripts();
+  }
+
+  /// 把启用的脚本落到本地 HTTP 目录。页面请求 index 时会在游戏脚本前插入它们。
+  Future<void> _publishScripts() {
+    final run = _publishChain.then((_) => _publishScriptsOnce());
+    _publishChain = run.catchError((Object _) {});
+    return run;
+  }
+
+  Future<void> _publishScriptsOnce() async {
+    try {
+      final shim = File(
+        '${widget.rendererDir.path}${Platform.pathSeparator}xyzw-gm-shim.js',
+      );
+      if (!await shim.exists() || await shim.length() != InjectScripts.gmShim.length) {
+        await shim.writeAsString(InjectScripts.gmShim, flush: false);
+      }
+      final enabled = widget.scripts.enabledScripts;
+      final published = await ScriptCache.publish(
+        root: widget.rendererDir,
+        scripts: enabled,
+        sourceFile: widget.scripts.codeFile,
+      );
+      if (published.isEmpty) {
+        AppLog.i('script', '没有启用的脚本（enabled=${enabled.length}）');
+      } else {
+        final detail = published
+            .map((e) => '${e.name} ${e.bytes}B')
+            .join('、');
+        AppLog.i(
+          'script',
+          '已写入页面脚本 ${published.length}/${enabled.length}：$detail',
+        );
+      }
+      _scriptsReady = true;
+    } catch (e) {
+      AppLog.e('script', '发布脚本失败 $e');
+    }
+  }
+
+  Future<void> _bootServerAndOpen(String accountId) async {
+    if (!widget.status.isReady) {
+      setState(() => _bootError = widget.status.describe());
+      return;
+    }
+
+    if (_server == null) {
+      final existing = widget.httpServer;
+      if (existing != null && existing.port != 0) {
+        _server = existing;
+        _ownsServer = false;
+        _baseUrl = existing.baseUrl;
+      } else {
+        final server = LocalHttpServer(widget.rendererDir);
+        final url = await server.start();
+        if (url == null) {
+          if (!mounted) return;
+          setState(() => _bootError = '本地 HTTP 服务器启动失败');
+          return;
+        }
+        _server = server;
+        _ownsServer = true;
+        _baseUrl = url;
+      }
+    }
+
+    await _ensureSession(accountId);
+    _emitRunning();
+  }
+
+  void _emitRunning() {
+    widget.onRunningChanged?.call(Set<String>.from(_sessions.keys));
+  }
+
+  Future<void> openAccount(String accountId) => _bootServerAndOpen(accountId);
+
+  Future<void> closeAccount(String accountId) async {
+    _readyTimers.remove(accountId)?.cancel();
+    final s = _sessions.remove(accountId);
+    if (s != null) {
+      try {
+        await s.controller.loadRequest(Uri.parse('about:blank'));
+      } catch (_) {}
+    }
+    if (_activeId == accountId && _sessions.isNotEmpty) {
+      _activeId = _sessions.keys.first;
+    }
+    if (mounted) setState(() {});
+    _emitRunning();
+    if (_sessions.isEmpty) widget.onBack();
+  }
+
+  Future<void> restartAccount(String accountId) async {
+    if (_sessions.containsKey(accountId)) {
+      final session = _sessions[accountId]!;
+      // 先盖加载层再 reload，避免黑屏闪一下
+      session.loading = true;
+      if (mounted) setState(() => _activeId = accountId);
+      await Future<void>.delayed(Duration.zero);
+      await _stageBin(accountId);
+      if (!_scriptsReady) await _publishScripts();
+      _armReadyWatch(accountId);
+      // reload 复用 HTTP 磁盘缓存；带新 t= 的 loadRequest 会逼整页重下
+      await session.controller.reload();
+      return;
+    }
+    await openAccount(accountId);
+  }
+
+  Future<void> _ensureSession(String accountId) async {
+    if (_sessions.containsKey(accountId) || _bootingIds.contains(accountId)) {
+      if (mounted) setState(() => _activeId = accountId);
+      return;
+    }
+    final account = widget.store.byId(accountId);
+    if (account == null || _baseUrl == null) return;
+
+    _bootingIds.add(accountId);
+    if (mounted) setState(() => _activeId = accountId);
+
+    try {
+      final controller = WebViewController();
+      await controller.setJavaScriptMode(JavaScriptMode.unrestricted);
+      await controller.setBackgroundColor(const Color(0xFFF2F2F7));
+
+      if (controller.platform is AndroidWebViewController) {
+        final android = controller.platform as AndroidWebViewController;
+        AndroidWebViewController.enableDebugging(false);
+        await android.setMediaPlaybackRequiresUserGesture(false);
+        await android.setTextZoom(100);
+        await android.setCustomWidgetCallbacks(
+          onShowCustomWidget: (Widget widget, OnHideCustomWidgetCallback onHidden) {
+            onHidden();
+          },
+          onHideCustomWidget: () {},
+        );
+      }
+
+      await controller.addJavaScriptChannel(
+        'XyzwBridge',
+        onMessageReceived: (msg) => _onBridge(accountId, msg.message),
+      );
+      await controller.setOnConsoleMessage((m) {
+        final text = m.message;
+        if (text.contains('咸强之王') ||
+            m.level == JavaScriptLogLevel.error) {
+          AppLog.js('${m.level.name}: $text');
+        }
+      });
+
+      await controller.setNavigationDelegate(
+        NavigationDelegate(
+          onPageStarted: (_) => _injectEarly(controller, account),
+          onPageFinished: (_) async {
+            AppLog.i('game', 'HTTP加载完成: $_baseUrl ($accountId)');
+            try {
+              await controller.runJavaScript(
+                '${InjectScripts.vhFix}\n${InjectScripts.canvasGuard}\n'
+                '${InjectScripts.lateSdkReady}\nwindow.__xyzwRoleBridge=false;\n'
+                '${InjectScripts.roleBridge}\n${InjectScripts.gameReadyWatch}',
+              );
+            } catch (e) {
+              AppLog.e('game', '晚注入失败: $e');
+              _markReady(accountId);
+            }
+          },
+          onWebResourceError: (err) {
+            if (err.isForMainFrame ?? false) {
+              AppLog.e('game', '页面加载失败: ${err.description}');
+            }
+          },
+        ),
+      );
+
+      final session = _Session(accountId: accountId, controller: controller);
+      _sessions[accountId] = session;
+
+      await _stageBin(accountId);
+      if (!_scriptsReady) await _publishScripts();
+      _armReadyWatch(accountId);
+      final target = Uri.parse(_gameUrl(_baseUrl!));
+      await controller.loadRequest(target);
+      unawaited(widget.store.touchLastUsed(accountId));
+
+      if (!mounted) return;
+      setState(() {});
+      _emitRunning();
+    } catch (e) {
+      final s = _sessions[accountId];
+      if (s != null) {
+        s.loading = false;
+        s.error = e.toString();
+      } else {
+        _bootError = e.toString();
+      }
+      if (mounted) setState(() {});
+    } finally {
+      _bootingIds.remove(accountId);
+    }
+  }
+
+  /// 固定 query，避免每次换 t= 导致文档与关联请求缓存失效。
+  String _gameUrl(String base) =>
+      '$base/?origin=https://xxz-xyzw.hortorgames.com';
+
+  Future<void> _stageBin(String accountId) async {
+    final account = widget.store.byId(accountId);
+    if (account == null) return;
+    try {
+      final dir = Directory(
+        '${widget.rendererDir.path}${Platform.pathSeparator}__xyzw_bins',
+      );
+      await dir.create(recursive: true);
+      final file = File(
+        '${dir.path}${Platform.pathSeparator}${LocalHttpServer.binFileName(accountId)}.bin',
+      );
+      final bytes = account.binHex.length > 16384
+          ? await compute(Account.hexToBytes, account.binHex)
+          : Account.hexToBytes(account.binHex);
+      if (!await file.exists() || await file.length() != bytes.length) {
+        await file.writeAsBytes(bytes, flush: false);
+      }
+    } catch (e) {
+      AppLog.w('game', '写入 BIN 文件失败 $e');
+    }
+  }
+
+  void _armReadyWatch(String accountId) {
+    _readyTimers[accountId]?.cancel();
+    // 最长盖住加载层，等 canvas/SDK；超时再收起，避免一直转圈
+    _readyTimers[accountId] = Timer(const Duration(seconds: 22), () {
+      _markReady(accountId);
+    });
+  }
+
+  void _markReady(String accountId) {
+    _readyTimers.remove(accountId)?.cancel();
+    final s = _sessions[accountId];
+    if (s == null || !s.loading) return;
+    s.loading = false;
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _injectEarly(WebViewController controller, Account account) async {
+    final binUrl =
+        '/__xyzw/bin/${LocalHttpServer.binFileName(account.id)}';
+    await controller.runJavaScript(
+      '${InjectScripts.compat}\n${InjectScripts.xhrIntercept}\n'
+      '${InjectScripts.activateBinUrl(binUrl, account.fileLabel)}\n'
+      '${InjectScripts.gameReadyWatch}',
+    );
+    if (kDebugMode) {
+      await controller.runJavaScript(InjectScripts.hsdkProbe);
+    }
+    AppLog.i('game', 'BIN地址注入成功 ${account.fileLabel}');
+  }
+
+  void _onBridge(String accountId, String raw) {
+    try {
+      final map = jsonDecode(raw) as Map<String, dynamic>;
+      final type = map['type'] as String?;
+      if (type == 'gm') {
+        final id = map['id'] as String?;
+        final payload = map['payload'];
+        if (id != null && payload is Map) {
+          _handleGm(accountId, id, Map<String, dynamic>.from(payload));
+        }
+        return;
+      }
+      if (type == 'scriptStatus') {
+        AppLog.i('script', map['message'] as String? ?? '');
+        return;
+      }
+      if (type == 'roleLog') {
+        AppLog.i('avatar', map['message'] as String? ?? raw);
+        return;
+      }
+      if (type == 'gameReady') {
+        _markReady(accountId);
+        return;
+      }
+      if (type == 'role') {
+        // 已进号说明过了黑屏加载，可收起壳层
+        _markReady(accountId);
+      }
+      if (type != 'role') return;
+
+      final name = (map['name'] as String?)?.trim();
+      var avatar = (map['avatar'] as String?)?.trim();
+      final headRaw = map['headImgRaw']?.toString() ?? '';
+      final from = map['from']?.toString() ?? '';
+      final lordSkinId = (map['lordSkinId'] as num?)?.toInt() ?? 0;
+      var roleId = (map['roleId'] as num?)?.toInt() ?? 0;
+      if (roleId <= 0) {
+        roleId = RoleAvatarCache.roleIdFromName(
+              widget.store.byId(accountId)?.name ?? '',
+            ) ??
+            0;
+      }
+      if (avatar != null && avatar.isNotEmpty) {
+        avatar = RoleAvatarCache.normalize(avatar);
+      }
+
+      AppLog.i(
+        'avatar',
+        'Dart收 account=$accountId roleId=$roleId name=$name '
+        'from=$from headRaw=$headRaw lordSkinId=$lordSkinId avatar=$avatar',
+      );
+
+      if (roleId > 0 && avatar != null && avatar.startsWith('http')) {
+        // ignore: unawaited_futures
+        RoleAvatarCache.put(roleId, avatar);
+      }
+
+      final cur = widget.store.byId(accountId);
+      final nextAvatar = (avatar != null && avatar.isNotEmpty)
+          ? avatar
+          : cur?.avatarUrl;
+      // ignore: unawaited_futures
+      widget.store.updateProfile(
+        accountId,
+        roleName: (name != null && name.isNotEmpty) ? name : null,
+        avatarUrl: nextAvatar,
+      );
+    } catch (e) {
+      AppLog.w('avatar', 'bridge parse fail: $e raw=$raw');
+    }
+  }
+
+  Future<void> _handleGm(
+    String accountId,
+    String reqId,
+    Map<String, dynamic> payload,
+  ) async {
+    final result = await _gmRequest(payload);
+    final s = _sessions[accountId];
+    if (s == null) return;
+    final js =
+        'window.__gmResolve && window.__gmResolve(${jsonEncode(reqId)}, ${jsonEncode(jsonEncode(result))});';
+    try {
+      await s.controller.runJavaScript(js);
+    } catch (_) {}
+  }
+
+  Future<Map<String, dynamic>> _gmRequest(Map<String, dynamic> payload) async {
+    final url = payload['url'] as String? ?? '';
+    final method = (payload['method'] as String? ?? 'GET').toUpperCase();
+    final data = payload['data'] as String?;
+    final timeoutMs = (payload['timeout'] as num?)?.toInt() ?? 20000;
+    final headers = payload['headers'];
+    AppLog.i('script', 'GM_xhr $method $url');
+    try {
+      final client = HttpClient();
+      client.connectionTimeout = Duration(milliseconds: timeoutMs.clamp(1000, 60000));
+      final req = await client.openUrl(method, Uri.parse(url));
+      req.followRedirects = true;
+      if (headers is Map) {
+        headers.forEach((k, v) {
+          req.headers.set('$k', '$v');
+        });
+      }
+      if (data != null) {
+        if (req.headers.value('content-type') == null) {
+          req.headers.set('content-type', 'application/json;charset=utf-8');
+        }
+        req.add(utf8.encode(data));
+      }
+      final res = await req.close().timeout(
+        Duration(milliseconds: timeoutMs.clamp(1000, 60000)),
+      );
+      final body = await utf8.decodeStream(res);
+      final headerBuf = StringBuffer();
+      res.headers.forEach((name, values) {
+        headerBuf.writeln('$name: ${values.join(', ')}');
+      });
+      client.close(force: true);
+      final preview = body.length <= 300 ? body : '${body.substring(0, 300)}…';
+      AppLog.i(
+        'script',
+        'GM_xhr 完成 ${res.statusCode} $url (${body.length}B) body=$preview',
+      );
+      if (data != null && data.isNotEmpty) {
+        final reqPrev = data.length <= 200 ? data : '${data.substring(0, 200)}…';
+        AppLog.i('script', 'GM_xhr 请求体 $reqPrev');
+      }
+      return {
+        'status': res.statusCode,
+        'statusText': res.reasonPhrase.isEmpty ? 'OK' : res.reasonPhrase,
+        'responseText': body,
+        'responseHeaders': headerBuf.toString(),
+        'finalUrl': res.redirects.isEmpty ? url : res.redirects.last.location.toString(),
+      };
+    } catch (e) {
+      AppLog.w('script', 'GM_xhr 失败 $url → $e');
+      return {'status': 0, 'error': e.toString()};
+    }
+  }
+
+  Future<void> _switchAccount() async {
+    final accounts = widget.store.accounts;
+    if (accounts.isEmpty) return;
+
+    final picked = await showCupertinoModalPopup<String>(
+      context: context,
+      builder: (ctx) {
+        return ClipRRect(
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(14)),
+          child: Material(
+              color: const Color(0xFFF2F2F7),
+              child: SafeArea(
+                top: false,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const SizedBox(height: 8),
+                    Container(
+                      width: 36,
+                      height: 5,
+                      decoration: BoxDecoration(
+                        color: AppTheme.fill.withValues(alpha: 0.28),
+                        borderRadius: BorderRadius.circular(3),
+                      ),
+                    ),
+                    const Padding(
+                      padding: EdgeInsets.fromLTRB(16, 14, 16, 8),
+                      child: Row(
+                        children: [
+                          Text(
+                            '切换账号',
+                            style: TextStyle(
+                              fontSize: 17,
+                              fontWeight: FontWeight.w600,
+                              letterSpacing: -0.3,
+                            ),
+                          ),
+                          Spacer(),
+                          Text(
+                            '已进入的会直接切回',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: AppTheme.textSecondary,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    ConstrainedBox(
+                      constraints: BoxConstraints(
+                        maxHeight: MediaQuery.of(ctx).size.height * 0.5,
+                      ),
+                      child: ListView.separated(
+                        shrinkWrap: true,
+                        itemCount: accounts.length,
+                        separatorBuilder: (context, index) => Divider(
+                          height: 0.5,
+                          indent: 60,
+                          color: AppTheme.separator.withValues(alpha: 0.55),
+                        ),
+                        itemBuilder: (_, i) {
+                          final a = accounts[i];
+                          final alive = _sessions.containsKey(a.id);
+                          final active = a.id == _activeId;
+                          return ListTile(
+                            dense: true,
+                            leading: _MiniAvatar(account: a),
+                            title: Text(
+                              a.displayName,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                            subtitle: Text(
+                              alive ? '已进入 · 点按切换' : '未进入 · 将重新加载',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: alive
+                                    ? AppTheme.green
+                                    : AppTheme.textSecondary,
+                              ),
+                            ),
+                            trailing: active
+                                ? const Icon(
+                                    CupertinoIcons.checkmark_alt,
+                                    size: 20,
+                                    color: AppTheme.blue,
+                                  )
+                                : null,
+                            onTap: () => Navigator.pop(ctx, a.id),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+        );
+      },
+    );
+
+    if (picked == null || picked == _activeId) return;
+    await _ensureSession(picked);
+  }
+
+  @override
+  void dispose() {
+    widget.scripts.removeListener(_onScripts);
+    for (final t in _readyTimers.values) {
+      t.cancel();
+    }
+    _readyTimers.clear();
+    if (_ownsServer) unawaited(_server?.stop());
+    _sessions.clear();
+    SystemChrome.setSystemUIOverlayStyle(
+      const SystemUiOverlayStyle(
+        statusBarColor: Colors.transparent,
+        statusBarIconBrightness: Brightness.dark,
+      ),
+    );
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final active = widget.store.byId(_activeId);
+    final title = active?.displayName ?? '咸强之王';
+
+    return Scaffold(
+      backgroundColor: const Color(0xFFF2F2F7),
+      body: Column(
+        children: [
+          ClipRect(
+            child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF2F2F7),
+                  border: Border(
+                    bottom: BorderSide(
+                      color: AppTheme.separator.withValues(alpha: 0.45),
+                      width: 0.5,
+                    ),
+                  ),
+                ),
+                child: SafeArea(
+                  bottom: false,
+                  child: SizedBox(
+                    height: kToolbarHeight,
+                    child: Row(
+                      children: [
+                        IosIconButton(
+                          tooltip: '返回',
+                          icon: CupertinoIcons.back,
+                          color: AppTheme.blue,
+                          onPressed: widget.onBack,
+                        ),
+                        Expanded(
+                          child: Text(
+                            title,
+                            textAlign: TextAlign.center,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: AppTheme.text,
+                              fontSize: 17,
+                              fontWeight: FontWeight.w600,
+                              letterSpacing: -0.3,
+                            ),
+                          ),
+                        ),
+                        IosIconButton(
+                          tooltip: '切换账号',
+                          icon: CupertinoIcons.person_2,
+                          color: AppTheme.blue,
+                          onPressed: _bootError != null ? null : _switchAccount,
+                        ),
+                        IosIconButton(
+                          tooltip: '刷新当前',
+                          icon: CupertinoIcons.refresh,
+                          color: AppTheme.blue,
+                          onPressed: () async {
+                            await _publishScripts();
+                            final s = _sessions[_activeId];
+                            if (s == null) return;
+                            s.loading = true;
+                            setState(() {});
+                            await _stageBin(_activeId);
+                            _armReadyWatch(_activeId);
+                            await s.controller.reload();
+                          },
+                        ),
+                        const SizedBox(width: 4),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          Expanded(child: _buildBody()),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBody() {
+    if (_bootError != null) {
+      return _PlaceholderPanel(message: _bootError!);
+    }
+    if (_sessions.isEmpty || !_sessions.containsKey(_activeId)) {
+      return const ColoredBox(
+        color: Color(0xFFF2F2F7),
+        child: Center(child: CupertinoActivityIndicator()),
+      );
+    }
+
+    final ids = _sessions.keys.toList();
+    final index = ids.indexOf(_activeId);
+
+    return IndexedStack(
+      index: index < 0 ? 0 : index,
+      sizing: StackFit.expand,
+      children: [
+        for (final id in ids) _sessionView(_sessions[id]!),
+      ],
+    );
+  }
+
+  Widget _sessionView(_Session session) {
+    if (session.error != null) {
+      return _PlaceholderPanel(message: session.error!);
+    }
+    final booting =
+        session.loading || _bootingIds.contains(session.accountId);
+    // 加载中把 WebView 缩到 1px，避免 Hybrid Composition 黑底盖过 Flutter 加载层
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        Positioned(
+          left: 0,
+          top: 0,
+          width: booting ? 1 : null,
+          height: booting ? 1 : null,
+          right: booting ? null : 0,
+          bottom: booting ? null : 0,
+          child: RepaintBoundary(child: _buildWebView(session.controller)),
+        ),
+        if (booting)
+          const ColoredBox(
+            color: Color(0xFFF2F2F7),
+            child: Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  ClipOval(
+                    child: Image(
+                      image: AssetImage('assets/images/app_logo_circle.png'),
+                      width: 72,
+                      height: 72,
+                      fit: BoxFit.cover,
+                      filterQuality: FilterQuality.low,
+                      gaplessPlayback: true,
+                    ),
+                  ),
+                  SizedBox(height: 16),
+                  CupertinoActivityIndicator(),
+                  SizedBox(height: 10),
+                  Text(
+                    '资源加载中…',
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: Color(0xFF8E8E93),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildWebView(WebViewController controller) {
+    if (WebViewPlatform.instance is AndroidWebViewPlatform) {
+      return WebViewWidget.fromPlatformCreationParams(
+        params: AndroidWebViewWidgetCreationParams.fromPlatformWebViewWidgetCreationParams(
+          PlatformWebViewWidgetCreationParams(
+            controller: controller.platform,
+          ),
+          displayWithHybridComposition: true,
+        ),
+      );
+    }
+    return WebViewWidget(controller: controller);
+  }
+}
+
+class _MiniAvatar extends StatelessWidget {
+  const _MiniAvatar({required this.account});
+
+  final Account account;
+
+  @override
+  Widget build(BuildContext context) {
+    final initial =
+        account.displayName.isNotEmpty ? account.displayName.characters.first : '?';
+    return NetAvatar(
+      url: RoleAvatarCache.displayUrl(account.avatarUrl, account.name) ??
+          account.avatarUrl,
+      initial: initial,
+      size: 32,
+      radius: 6,
+    );
+  }
+}
+
+class _PlaceholderPanel extends StatelessWidget {
+  const _PlaceholderPanel({required this.message});
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return ColoredBox(
+      color: AppTheme.bg,
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(20),
+        child: SelectableText(
+          message,
+          style: const TextStyle(color: AppTheme.text, fontSize: 13, height: 1.4),
+        ),
+      ),
+    );
+  }
+}

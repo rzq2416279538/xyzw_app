@@ -1,0 +1,52 @@
+name: xyzw_app
+description: 鱼壳 / xyzw_helper — Flutter 一期游戏壳（对齐 naiwa-release）
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.13.5
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  webview_flutter: ^4.13.0
+  webview_flutter_android: ^4.10.0
+  path_provider: ^2.1.5
+  shared_preferences: ^2.5.3
+  file_picker: ^10.1.2
+  uuid: ^4.5.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+  # 正版/第三方壳资源仅本地用（.gitignore 不入库）
+  # 引擎对照 xyzw_web_helper；internal/turnpass/favicon 对照「鸟哥之王 Pro」assets/www
+  assets:
+    - assets/renderer/index.html
+    - assets/renderer/hsdk-mock.js
+    - assets/renderer/patch.js
+    - assets/renderer/cocos-bundle-patch.js
+    - assets/renderer/naiwa-uifix.css
+    - assets/renderer/README.md
+    - assets/renderer/cocos2d-js-min.a5841.js
+    - assets/renderer/main.2a00e.js
+    - assets/renderer/game-defines.a175e.js
+    - assets/renderer/style-mobile.1777a.css
+    - assets/renderer/splash.85cfd.png
+    - assets/renderer/favicon.8de18.ico
+    - assets/renderer/src/settings.da7ef.js
+    - assets/renderer/src/assets/launcher/common/libs/platform/hortor/HSDK.turnpass.min.js
+    - assets/renderer/assets/internal/config.json
+    - assets/renderer/assets/internal/index.js
+    - assets/renderer/assets/internal/config.a0340.json
+    - assets/renderer/assets/internal/index.a0340.js
+    - assets/renderer/assets/internal/import/09/0967b326a.1f618.json
+    - assets/renderer/assets/internal/native/02/0275e94c-56a7-410f-bd1a-fc7483f7d14a.cea68.png
+    - assets/images/default_avatar.jpg
+    - assets/images/app_logo.png
+    - assets/images/app_logo_circle.png

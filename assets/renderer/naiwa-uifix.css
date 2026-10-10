@@ -1,0 +1,20 @@
+/*
+ * 脚本面板显示修正。
+ *
+ * 只解除 body 的 flex，让脚本面板不再被 canvas 挤到画面外。
+ * 不要全局抬 z-index / pointer-events：会盖住游戏导致点不到，
+ * 也会打乱外部脚本自己的定位与尺寸。
+ */
+
+body {
+  display: block !important;
+}
+
+#GameCanvas,
+#Cocos2dGameContainer {
+  position: absolute !important;
+  left: 0;
+  top: 0;
+  z-index: 1 !important;
+  pointer-events: auto !important;
+}

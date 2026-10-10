@@ -1,0 +1,66 @@
+# 在 GitHub 的免费 macOS 跑器上编「未签名 IPA」，下载后用自签工具安装。
+# 用法：GitHub → Actions →「iOS Unsigned IPA」→ Run workflow
+name: iOS Unsigned IPA
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'ios-*'
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          # 尽量用较新的 Xcode（支持新 iOS）；具体列表随镜像变化
+          ls /Applications | grep -i Xcode || true
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          xcodebuild -version
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Flutter pub get
+        run: flutter pub get
+
+      - name: CocoaPods
+        working-directory: ios
+        run: |
+          pod repo update --silent || true
+          pod install
+
+      - name: Build iOS release (no codesign)
+        run: |
+          flutter build ios --release --no-codesign
+
+      - name: Pack unsigned IPA
+        run: |
+          set -e
+          APP="build/ios/iphoneos/Runner.app"
+          test -d "$APP"
+          STAGE="$(mktemp -d)"
+          mkdir -p "$STAGE/Payload"
+          cp -R "$APP" "$STAGE/Payload/"
+          (
+            cd "$STAGE"
+            zip -qry "$GITHUB_WORKSPACE/咸强之王-unsigned.ipa" Payload
+          )
+          ls -lh "咸强之王-unsigned.ipa"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xyzw-unsigned-ipa
+          path: 咸强之王-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14
