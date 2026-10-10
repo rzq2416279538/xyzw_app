@@ -1577,4 +1577,70 @@ try {
 })();
 ''';
   }
+
+  /// 把壳侧备份写回 localStorage，须在游戏读设置之前执行。
+  static String restoreGamePrefs(Map<String, String> data) {
+    final buf = StringBuffer('(function(){try{');
+    var n = 0;
+    for (final e in data.entries) {
+      if (e.key.startsWith('__xyzw')) continue;
+      n++;
+      buf.writeln(
+        'if(localStorage.getItem(${jsQuote(e.key)})===null)'
+        'localStorage.setItem(${jsQuote(e.key)}, ${jsQuote(e.value)});',
+      );
+    }
+    buf.writeln(
+      "console.log('[咸强之王] 已恢复游戏设置 keys=$n');",
+    );
+    buf.writeln(
+      '}catch(e){console.warn("[咸强之王] 恢复游戏设置失败",e);}})();',
+    );
+    return buf.toString();
+  }
+
+  /// 设置变更时回传到 Dart，杀进程后仍能还原。
+  static const persistGamePrefs = r'''
+(function(){
+  if (window.__xyzwPrefsWatch) return;
+  window.__xyzwPrefsWatch = true;
+  var last = '';
+  function dump(){
+    try {
+      var out = {};
+      for (var i = 0; i < localStorage.length; i++) {
+        var k = localStorage.key(i);
+        if (!k || k.indexOf('__xyzw') === 0) continue;
+        var v = localStorage.getItem(k);
+        if (v == null || v.length > 200000) continue;
+        out[k] = v;
+      }
+      var s = JSON.stringify(out);
+      if (s === last) return;
+      last = s;
+      if (window.XyzwBridge && window.XyzwBridge.postMessage) {
+        window.XyzwBridge.postMessage(JSON.stringify({ type: 'gamePrefs', data: out }));
+      }
+    } catch (e) {}
+  }
+  try {
+    var proto = Storage.prototype;
+    var _set = proto.setItem;
+    proto.setItem = function(k, v){
+      var r = _set.apply(this, arguments);
+      try {
+        if (String(k || '').indexOf('__xyzw') !== 0) {
+          if (window.__xyzwPrefsDumpTimer) clearTimeout(window.__xyzwPrefsDumpTimer);
+          window.__xyzwPrefsDumpTimer = setTimeout(dump, 500);
+        }
+      } catch (e) {}
+      return r;
+    };
+  } catch (e) {}
+  setInterval(dump, 12000);
+  document.addEventListener('visibilitychange', dump);
+  window.addEventListener('pagehide', dump);
+  setTimeout(dump, 2000);
+})();
+''';
 }

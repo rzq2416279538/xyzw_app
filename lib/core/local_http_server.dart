@@ -17,6 +17,9 @@ class LocalHttpServer {
   ReceivePort? _inbox;
   int port = 0;
 
+  /// 固定端口，保证 WKWebView origin 稳定，游戏 localStorage（帧率/声音）才能跨进程保留。
+  static const preferredPort = 18762;
+
   /// iOS：必须用 127.0.0.1（localhost 常走 IPv6 ::1，服务只听 IPv4）。
   /// Android：保留 localhost，兼容部分油猴脚本白名单。
   String get baseUrl =>
@@ -46,7 +49,7 @@ class LocalHttpServer {
       });
       _isolate = await Isolate.spawn(
         _httpIsolateMain,
-        (rootDir.path, inbox.sendPort),
+        (rootDir.path, inbox.sendPort, preferredPort),
         debugName: 'xyzw-http',
       );
       final msg = await ready.future.timeout(const Duration(seconds: 8));
@@ -80,17 +83,31 @@ class LocalHttpServer {
   }
 }
 
-void _httpIsolateMain((String root, SendPort ready) args) async {
+void _httpIsolateMain((String root, SendPort ready, int preferredPort) args) async {
   final rootDir = Directory(args.$1);
   final cache = <String, ({File file, int length, String mime})>{};
   HttpServer? server;
   try {
-    server = await HttpServer.bind(
-      InternetAddress.loopbackIPv4,
-      0,
-      backlog: 128,
-      shared: false,
-    );
+    Object? lastErr;
+    for (var i = 0; i < 8; i++) {
+      final p = args.$3 + i;
+      try {
+        server = await HttpServer.bind(
+          InternetAddress.loopbackIPv4,
+          p,
+          backlog: 128,
+          shared: false,
+        );
+        lastErr = null;
+        break;
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+    if (server == null) {
+      args.$2.send('error:bind:$lastErr');
+      return;
+    }
     final cmd = ReceivePort();
     args.$2.send([server.port, cmd.sendPort]);
     cmd.listen((msg) async {

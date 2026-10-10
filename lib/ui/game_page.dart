@@ -11,6 +11,7 @@ import 'package:webview_flutter_android/webview_flutter_android.dart';
 import 'package:webview_flutter_wkwebview/webview_flutter_wkwebview.dart';
 
 import '../core/app_log.dart';
+import '../core/game_prefs_store.dart';
 import '../core/inject_scripts.dart';
 import '../core/local_http_server.dart';
 import '../core/renderer_status.dart';
@@ -596,11 +597,15 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
         : '/__xyzw/bin/$binName';
 
     // xhrIntercept / 异常侦测自身幂等；页面重建后标志丢失会自动重装
+    await GamePrefsStore.load();
+    final prefs = GamePrefsStore.data;
     await controller.runJavaScript(
       '${InjectScripts.compat}\n${InjectScripts.xhrIntercept}\n'
       '${InjectScripts.visibilityKeepAlive}\n'
       '${InjectScripts.clientAnomalyWatch}\n'
-      '${InjectScripts.pvpDiagWatch}',
+      '${InjectScripts.pvpDiagWatch}\n'
+      '${InjectScripts.persistGamePrefs}\n'
+      '${prefs.isEmpty ? '' : InjectScripts.restoreGamePrefs(prefs)}',
     );
 
     // iOS：优先 Dart→base64 灌入缓冲；HTTP 拉取作备用
@@ -666,6 +671,18 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
       }
       if (type == 'gameReady') {
         _markReady(accountId);
+        return;
+      }
+      if (type == 'gamePrefs') {
+        final data = map['data'];
+        if (data is Map) {
+          final next = <String, String>{
+            for (final e in data.entries)
+              if (e.value != null) e.key.toString(): e.value.toString(),
+          };
+          unawaited(GamePrefsStore.save(next));
+          AppLog.i('prefs', '已备份游戏设置 keys=${next.length}');
+        }
         return;
       }
       if (type == 'clientAnomaly') {
