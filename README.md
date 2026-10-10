@@ -1,72 +1,83 @@
 # 咸强之王
 
-基于 Flutter 的游戏辅助壳：管理多个角色账号，在本地用 WebView 加载游戏前端，注入登录数据与用户脚本，方便多号切换与日常操作。
+Flutter 游戏辅助壳：在手机上管理多个角色，通过本地 WebView 加载游戏前端，完成登录注入与用户脚本挂载。
 
-仓库：[rzq2416279538/xyzw_app](https://github.com/rzq2416279538/xyzw_app)
+## 项目是什么
 
-## 能做什么
+面向「咸鱼之王」类网页/壳端玩法的 **多账号启动器**。  
+不重新实现游戏逻辑，而是：
 
-- **角色管理**：导入角色（扫码 / 手机号 / `.bin`），列表展示头像、昵称、最近使用时间
-- **一键进游戏**：本地 HTTP 提供游戏资源，WebView 加载；BIN 走本地文件注入，XHR 拦截完成登录
-- **多会话**：已进入的账号可切换，不必每次从头加载（进程内保活）
-- **脚本管理**：仅外部导入油猴脚本；支持全部开启 / 关闭，进游戏时以 `<script src>` 挂载
-- **跨域代理**：脚本里的跨域请求经 Dart 桥转发，减少 CORS 限制
-- **日志导出**：便于排查进游戏、脚本、头像等问题
+1. 在本地展开游戏 renderer，用 HTTP 提供静态资源  
+2. 用 WebView 打开游戏页（避免 `file://` 限制）  
+3. 把当前角色的登录 BIN 交给页面，拦截登录请求完成进服  
+4. 按需加载用户导入的油猴脚本  
 
-## 技术结构（简要）
+目标是：**列表管号 → 一点进游戏 → 脚本可选启用**，体验接近常见原生壳，但用 Flutter 跨端实现（当前以 Android 为主）。
 
-| 模块 | 说明 |
+## 已实现能力
+
+- **角色管理**：导入角色（扫码 / 手机号 / `.bin`），列表展示头像、昵称、最近使用  
+- **进游戏**：本地 HTTP + WebView；BIN 以文件方式提供给页面，经 XHR 拦截完成登录  
+- **多会话**：同一进程内可保留多个已进入账号，切换时尽量不销毁 WebView  
+- **脚本管理**：仅外部导入 `.js`；支持单个开关与全部开关；进游戏时以 `<script src>` 挂载  
+- **跨域代理**：脚本跨域请求经应用内桥转发，减轻浏览器 CORS 限制  
+- **日志导出**：便于排查进服、脚本、头像抓取等问题  
+- **资源预热与缓存**：首页预拉关键引擎文件；带 hash 的静态资源使用较长缓存策略  
+
+## 技术路线
+
+| 层级 | 方案 |
 | --- | --- |
-| `lib/ui/` | 首页、导入、脚本、游戏页 |
-| `lib/core/local_http_server.dart` | 本地静态服务（独立 isolate） |
-| `lib/core/inject_scripts.dart` | 兼容层、BIN、油猴垫片、角色桥 |
-| `lib/core/script_cache.dart` | 用户脚本发布到 `userscripts/` |
-| `lib/data/` | 账号与脚本持久化 |
-| `assets/renderer/` | 游戏前端入口与 SDK 模拟层（正版引擎资源不入库） |
-| `.github/workflows/ios-unsigned-ipa.yml` | GitHub Actions 打未签名 IPA，便于自签安装 |
+| UI | Flutter（偏 iOS 风格实色界面） |
+| 游戏容器 | `webview_flutter`（Android Hybrid Composition） |
+| 资源服务 | Dart `HttpServer`，独立 isolate 读盘，根目录为本地 renderer 缓存 |
+| 登录 | 角色 BIN → 本地路径 `/__xyzw/bin/...` → 页面拉取；XHR 拦截登录接口 body |
+| 脚本 | GM 兼容垫片 + `userscripts/` 文件发布；跨域走 `XyzwBridge` |
+| 数据 | 本机持久化账号与脚本元数据（不含正版游戏大资源入库） |
 
-## 环境要求
+主要代码位置：
 
-- Flutter 稳定版（建议与本机 `flutter doctor` 一致）
-- **Android**：可直接 `flutter run` / 打 release APK
-- **iOS**：需较新的 macOS + Xcode；本仓库提供 CI 未签名 IPA 流程，可用自签工具安装到自己的设备
+- `lib/ui/`：首页、导入、脚本、游戏页  
+- `lib/core/local_http_server.dart`：本地静态服务  
+- `lib/core/inject_scripts.dart`：注入与兼容脚本  
+- `lib/core/script_cache.dart` / `renderer_cache.dart`：脚本发布与 renderer 缓存  
+- `lib/data/`：账号、脚本存储  
+- `assets/renderer/`：入口页与 SDK 模拟层（完整引擎资源需本机自备，默认不进 Git）  
 
-## 本机准备
+实现思路对齐常见原生壳（本地 HTTP + WebView + 注入），用 Flutter 重做壳层与账号流程。
 
-### 1. 游戏 renderer
+## 使用说明
 
-仓库仅包含入口与模拟层（如 `index.html`、`hsdk-mock.js`、`patch.js` 等）。  
-完整 Cocos 引擎与资源需自行放到应用缓存目录，或开发期放入 `assets/renderer/`（已被 `.gitignore` 忽略正版资源）。
+### 环境
 
+- 已安装 Flutter 稳定版  
+- Android SDK / 真机或模拟器（推荐真机）  
+
+### 游戏资源
+
+仓库只带入口与模拟层（如 `index.html`、`hsdk-mock.js`、`patch.js` 等）。  
+完整 Cocos 引擎与资源文件需自行放到应用可写的 renderer 目录，或开发期放入 `assets/renderer/`（正版资源已被 `.gitignore` 忽略）。  
 文件名需与 `index.html` 中的引用一致。
 
-### 2. 角色数据
-
-通过 App 内「导入角色」获取区服登录用 `.bin`（或扫码 / 手机号流程）。账号数据保存在本机，勿提交到 Git。
-
-## 运行
+### 运行
 
 ```bash
 flutter pub get
-flutter run          # Android 真机 / 模拟器
+flutter run
+# 或
 flutter build apk --release
 ```
 
-## iOS 未签名包（GitHub Actions）
+### 基本流程
 
-1. 将代码推送到本仓库  
-2. GitHub → **Actions** → **iOS Unsigned IPA** → **Run workflow**  
-3. 完成后下载 Artifact 中的 `咸强之王-unsigned.ipa`  
-4. 使用自签工具 + 免费 Apple ID 安装到自己的 iPhone（证书约 7 天需重签）
+1. 首次启动会检查 renderer 是否就绪  
+2. 「导入角色」加入账号  
+3. 点账号 → 启动 / 进入游戏  
+4. 需要脚本时在「脚本管理」导入 `.js` 并开启  
 
-## 使用提示
-
-1. 资源未就绪时，首页会提示缺失项，请先补齐 renderer  
-2. 导入角色后，点账号 → **启动 / 进入**  
-3. 游戏地址应为 `http://localhost:<port>/`（不要用 `file://`）  
-4. 脚本在「脚本管理」中导入 `.js` 并开启后，进入或刷新游戏生效  
+进游戏后地址应为 `http://localhost:<端口>/`。
 
 ## 说明
 
-- 本项目为个人学习与自用辅助壳，不包含也不分发游戏正版客户端资源  
-- 请遵守游戏与平台相关规定，账号与脚本风险自负  
+- 本项目为个人学习与自用辅助壳，不包含、也不分发游戏正版客户端资源  
+- 请遵守游戏与平台相关规定；账号与第三方脚本风险自负  
