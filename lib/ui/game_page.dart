@@ -85,6 +85,8 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
   final Set<String> _recoveringIds = {};
   /// 后台较久后本地 HTTP 也可能死，下次开机前先探活
   var _httpSuspect = false;
+  /// 进后台时是否正在游玩（防止 visible 被误改后丢掉会话）
+  var _playingWhenBackgrounded = false;
 
   @override
   void initState() {
@@ -233,17 +235,23 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
       'sessions': _sessions.length,
       'ids': _sessions.keys.join(','),
     });
-    if (state == AppLifecycleState.paused ||
-        state == AppLifecycleState.hidden ||
-        state == AppLifecycleState.inactive) {
+    if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden) {
       _backgroundedAt ??= DateTime.now();
+      // inactive 时就记下「在玩」，避免随后 visible 被误改
+      if (!_playingWhenBackgrounded &&
+          widget.visible &&
+          _sessions.isNotEmpty) {
+        _playingWhenBackgrounded = true;
+      }
       if (state == AppLifecycleState.paused ||
           state == AppLifecycleState.hidden) {
-        if (widget.visible && _sessions.isNotEmpty) {
-          // 游戏内切后台：申请短时后台，尽量不断线
+        if (_playingWhenBackgrounded) {
+          // 游戏内切后台：保活，绝不丢会话
           unawaited(IosBgKeep.begin());
         } else if (!widget.visible && _sessions.isNotEmpty) {
-          // 已关游戏：清会话，避免 Offstage 死 WebView；整页由 Home 卸载
+          // 用户已明确关游戏后再进后台：清会话，整页由 Home 卸载
           unawaited(IosBgKeep.end());
           _discardAllSessionsSync('background_while_minimized');
         }
@@ -254,14 +262,17 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
       final bg = _backgroundedAt;
       _backgroundedAt = null;
       final sec = bg == null ? 0 : DateTime.now().difference(bg).inSeconds;
+      final wasPlaying = _playingWhenBackgrounded;
+      _playingWhenBackgrounded = false;
       AppLog.diag('lifecycle', {
         'event': 'resumed_after',
         'sec': sec,
         'gameVisible': widget.visible,
+        'wasPlaying': wasPlaying,
         'sessions': _sessions.length,
       });
       unawaited(IosBgKeep.end());
-      if (widget.visible && _sessions.isNotEmpty) {
+      if (wasPlaying && _sessions.isNotEmpty) {
         // 回前台仍在游戏：保活 HTTP + 触发 onShow/重连，不拆 WebView
         unawaited(_resumeInGameSessions(sec));
       } else if (sec >= 8 && !widget.visible && _sessions.isNotEmpty) {
