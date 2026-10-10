@@ -332,7 +332,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       });
       return;
     }
-    // 先显示游戏层再 open（若后台久了，GamePage 会硬重建过期会话）
+    // 先显示游戏层再 open（复用已有 WebView，不重登）
     setState(() => _gameVisible = true);
     await Future<void>.delayed(Duration.zero);
     await _gameKey.currentState?.openAccount(accountId);
@@ -601,12 +601,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     _running
                       ..clear()
                       ..addAll(ids);
-                    // 菜单「关闭」停光：卸掉空壳，再进不白屏
-                    if (ids.isEmpty) {
-                      _gameVisible = false;
-                      _gameMounted = false;
-                      _gameInitialId = null;
-                    }
+                  });
+                },
+                // 仅菜单「关闭」停光时卸页；重建中间态的 empty 绝不能卸
+                onAllClosed: () {
+                  if (!mounted) return;
+                  AppLog.i('lifecycle', '全部关闭，卸载 GamePage');
+                  setState(() {
+                    _gameVisible = false;
+                    _gameMounted = false;
+                    _gameInitialId = null;
+                    _running.clear();
                   });
                 },
               ),
