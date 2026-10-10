@@ -108,8 +108,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           _gameVisible = true;
           _userClosedGame = false;
         });
-      // 用户点返回时已立刻卸页；此处仅兜底
-      else if (_userClosedGame && _gameMounted) {
+      } else if (_userClosedGame && _gameMounted) {
+        // 用户点返回时通常已立刻卸页；此处仅兜底
         AppLog.w('lifecycle', '后台兜底卸载已关闭的 GamePage');
         setState(() {
           _gameMounted = false;
