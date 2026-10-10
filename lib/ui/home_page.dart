@@ -108,11 +108,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           _gameVisible = true;
           _userClosedGame = false;
         });
-      } else if (!_playingWhenBackgrounded &&
-          _userClosedGame &&
-          _gameMounted) {
-        // 用户点返回关游戏后再进后台：卸页防白屏
-        AppLog.w('lifecycle', '后台且用户已关游戏，卸载 GamePage');
+      // 用户点返回时已立刻卸页；此处仅兜底
+      else if (_userClosedGame && _gameMounted) {
+        AppLog.w('lifecycle', '后台兜底卸载已关闭的 GamePage');
         setState(() {
           _gameMounted = false;
           _gameInitialId = null;
@@ -306,11 +304,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   void _minimizeGame() {
-    // 只应由游戏顶栏返回调用；标记为用户主动关游戏
-    AppLog.i('lifecycle', '用户关闭游戏（顶栏返回）');
+    // 只应由游戏顶栏返回调用。立刻卸掉 GamePage，避免 Offstage 僵尸会话。
+    AppLog.i('lifecycle', '用户关闭游戏（顶栏返回），立即卸载');
     setState(() {
       _gameVisible = false;
       _userClosedGame = true;
+      _gameMounted = false;
+      _gameInitialId = null;
+      _running.clear();
     });
   }
 

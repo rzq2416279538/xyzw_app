@@ -277,9 +277,20 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
       });
       unawaited(IosBgKeep.end());
       if (wasPlaying && _sessions.isNotEmpty) {
-        // 回前台仍停在游戏页；后台久了必须硬重建才能重新上线（软 JS 救不了挂死）
+        // 加载过程中系统会闪 inactive/resumed（日志 17:45:07 sec=0），不要打断进号
+        if (sec < 3) {
+          AppLog.diag('lifecycle', {
+            'event': 'resume_skip_short',
+            'sec': sec,
+            'reason': 'likely_system_flicker',
+          });
+          return;
+        }
+        // 回前台仍停在游戏页；后台久了必须硬重建才能重新上线
         unawaited(_resumeInGameSessions(sec));
-      } else if (sec >= 8 && !widget.visible && _sessions.isNotEmpty) {
+      } else if (sec >= 8 &&
+          widget.userClosed &&
+          _sessions.isNotEmpty) {
         _httpSuspect = true;
         _discardAllSessionsSync('resume_minimized_${sec}s');
       }
