@@ -436,7 +436,7 @@ class _HomePageState extends State<HomePage> {
                     ? _Empty(onImport: _openImport)
                     : ListView.separated(
                         // iOS：略增缓存，滑动更顺
-                        scrollCacheExtent: 480,
+                        scrollCacheExtent: const ScrollCacheExtent.pixels(480),
                         padding: EdgeInsets.fromLTRB(
                           16,
                           MediaQuery.paddingOf(context).top + kToolbarHeight + 12,
