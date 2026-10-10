@@ -348,17 +348,20 @@ class _HomePageState extends State<HomePage> {
                   child: _HomeBrandLogo(),
                 ),
           title: _searchOpen
-              ? CupertinoSearchTextField(
-                  controller: _searchCtrl,
-                  placeholder: '搜索账号',
-                  onChanged: (v) => setState(() => _query = v),
-                  onSuffixTap: () {
-                    _searchCtrl.clear();
-                    setState(() {
-                      _query = '';
-                      _searchOpen = false;
-                    });
-                  },
+              ? Padding(
+                  padding: const EdgeInsets.only(left: 12, right: 4),
+                  child: CupertinoSearchTextField(
+                    controller: _searchCtrl,
+                    placeholder: '搜索账号',
+                    onChanged: (v) => setState(() => _query = v),
+                    onSuffixTap: () {
+                      _searchCtrl.clear();
+                      setState(() {
+                        _query = '';
+                        _searchOpen = false;
+                      });
+                    },
+                  ),
                 )
               : const Text(
                   '咸强之王',
@@ -432,6 +435,8 @@ class _HomePageState extends State<HomePage> {
                 : _filtered.isEmpty
                     ? _Empty(onImport: _openImport)
                     : ListView.separated(
+                        // iOS：略增缓存，滑动更顺
+                        scrollCacheExtent: 480,
                         padding: EdgeInsets.fromLTRB(
                           16,
                           MediaQuery.paddingOf(context).top + kToolbarHeight + 12,
@@ -459,10 +464,11 @@ class _HomePageState extends State<HomePage> {
     final dir = _rendererDir;
     final status = _status;
     final game = _gameMounted && dir != null && status != null && _gameInitialId != null
+        // 回首页只隐藏，不销毁；Ticker 保持开启，后台号继续跑（应用内保活）
         ? Offstage(
             offstage: !_gameVisible,
             child: TickerMode(
-              enabled: _gameVisible,
+              enabled: true,
               child: GamePage(
                 key: _gameKey,
                 store: widget.store,

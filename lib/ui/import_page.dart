@@ -9,7 +9,7 @@ import 'app_theme.dart';
 import 'ios_chrome.dart';
 import 'net_avatar.dart';
 
-enum _ImportTab { scan, sms, bin }
+enum _ImportTab { bin, scan, sms }
 
 /// 对照 naiwa-release `ui/ImportScreen.kt` + 鸟哥之王 Pro `qrcode.html`
 class ImportPage extends StatefulWidget {
@@ -23,7 +23,7 @@ class ImportPage extends StatefulWidget {
 
 class _ImportPageState extends State<ImportPage> {
   late final ImportController _vm;
-  _ImportTab _tab = _ImportTab.scan;
+  _ImportTab _tab = _ImportTab.bin;
   var _imported = 0;
 
   @override
@@ -123,6 +123,10 @@ class _ImportPageState extends State<ImportPage> {
                                   AppTheme.fill.withValues(alpha: 0.12),
                               thumbColor: Colors.white.withValues(alpha: 0.92),
                               children: const {
+                                _ImportTab.bin: Padding(
+                                  padding: EdgeInsets.symmetric(vertical: 8),
+                                  child: Text('bin 文件', style: TextStyle(fontSize: 13)),
+                                ),
                                 _ImportTab.scan: Padding(
                                   padding: EdgeInsets.symmetric(vertical: 8),
                                   child: Text('微信扫码', style: TextStyle(fontSize: 13)),
@@ -130,10 +134,6 @@ class _ImportPageState extends State<ImportPage> {
                                 _ImportTab.sms: Padding(
                                   padding: EdgeInsets.symmetric(vertical: 8),
                                   child: Text('手机号', style: TextStyle(fontSize: 13)),
-                                ),
-                                _ImportTab.bin: Padding(
-                                  padding: EdgeInsets.symmetric(vertical: 8),
-                                  child: Text('bin 文件', style: TextStyle(fontSize: 13)),
                                 ),
                               },
                               onValueChanged: (v) {
@@ -385,10 +385,25 @@ class _SmsPane extends StatelessWidget {
                 SizedBox(
                   width: double.infinity,
                   child: CupertinoButton.filled(
-                    onPressed: vm.busy ? null : vm.loginBySms,
+                    // busy 时保持实心蓝底，避免 disabled 灰底 + 白转圈看不见
+                    onPressed: vm.busy ? () {} : vm.loginBySms,
                     padding: const EdgeInsets.symmetric(vertical: 12),
                     child: vm.busy
-                        ? const CupertinoActivityIndicator(color: Colors.white)
+                        ? const Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              CupertinoActivityIndicator(color: Colors.white),
+                              SizedBox(width: 8),
+                              Text(
+                                '查询中…',
+                                style: TextStyle(
+                                  fontSize: 15,
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
+                          )
                         : const Text('登录并查询区服', style: TextStyle(fontSize: 15)),
                   ),
                 ),
@@ -428,10 +443,25 @@ class _BinPane extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 CupertinoButton.filled(
-                  onPressed: vm.busy ? null : onQuery,
+                  // busy 时保持实心蓝底，避免 disabled 灰底 + 白转圈看不见
+                  onPressed: vm.busy ? () {} : onQuery,
                   padding: const EdgeInsets.symmetric(vertical: 12),
                   child: vm.busy
-                      ? const CupertinoActivityIndicator(color: Colors.white)
+                      ? const Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            CupertinoActivityIndicator(color: Colors.white),
+                            SizedBox(width: 8),
+                            Text(
+                              '查询中…',
+                              style: TextStyle(
+                                fontSize: 15,
+                                color: Colors.white,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        )
                       : const Text('选择 bin，查询全服角色',
                           style: TextStyle(fontSize: 15)),
                 ),

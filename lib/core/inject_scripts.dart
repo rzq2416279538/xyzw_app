@@ -109,6 +109,156 @@ class InjectScripts {
 })();
 ''';
 
+  /// 比赛/踢线常见「客户端数据异常」侦测：抓弹窗、toast、console，并上报指纹便于对照。
+  static const clientAnomalyWatch = r'''
+(function(){
+  if (window.__xyzwClientWatch) return;
+  window.__xyzwClientWatch = true;
+  var KEYS = [
+    '客户端数据异常', '官方最新客户端', '请使用官方', '数据异常',
+    '客户端异常', '版本过低', '强制更新', '登录失效', '异地登录',
+    '连接已断开', '网络异常', '重新登录', '账号在其他', '被踢',
+    'client data', 'illegal client', 'official client'
+  ];
+  function hit(text){
+    var s = String(text || '');
+    if (!s) return null;
+    for (var i = 0; i < KEYS.length; i++) {
+      if (s.indexOf(KEYS[i]) >= 0) return KEYS[i];
+    }
+    return null;
+  }
+  function fingerprint(){
+    var out = {};
+    try {
+      out.href = String(location.href || '');
+      out.ua = String(navigator.userAgent || '').slice(0, 220);
+      out.platform = String(navigator.platform || '');
+      out.lang = String(navigator.language || '');
+      out.dpr = window.devicePixelRatio || 1;
+      out.inner = (window.innerWidth||0) + 'x' + (window.innerHeight||0);
+      out.vis = document.visibilityState;
+      out.hidden = !!document.hidden;
+      out.hasBuf = !!(window.__activeBinBuf && window.__activeBinBuf.byteLength);
+      out.binBytes = window.__activeBinBuf && window.__activeBinBuf.byteLength || 0;
+      out.xhrHook = !!window.__xhrIntercepted;
+      out.hsdk = typeof window.HSDK;
+      out.hsdkCanLogin = !!(window.HSDK && window.HSDK.canLogin);
+      out._hsdkInit = !!window._hsdkInit;
+      out.isH5 = !!(window.HSDK && window.HSDK.isH5);
+      try {
+        if (window.HSDK && typeof window.HSDK.getSystemInfo === 'function') {
+          out.sys = window.HSDK.getSystemInfo();
+        } else if (window.HSDK && window.HSDK.system && typeof window.HSDK.system.getSystemInfo === 'function') {
+          out.sys = window.HSDK.system.getSystemInfo();
+        }
+      } catch (e1) {}
+      try {
+        if (window.HSDK && typeof window.HSDK.getPlatform === 'function') {
+          out.sdkPlatform = window.HSDK.getPlatform();
+        }
+      } catch (e2) {}
+      try {
+        var req = window.__require;
+        if (typeof req === 'function') {
+          var SD = req('ServerData');
+          var R = SD && SD.ROLE;
+          if (R) {
+            out.roleId = R.roleId || R.id || 0;
+            out.serverId = R.serverId || R.realServerId || 0;
+            out.roleName = R.name || '';
+          }
+        }
+      } catch (e3) {}
+      out.ts = Date.now();
+    } catch (e) {
+      out.err = String(e && e.message || e);
+    }
+    return out;
+  }
+  function report(kind, text, extra){
+    var key = hit(text);
+    if (!key && kind !== 'fingerprint') return;
+    var payload = {
+      type: 'clientAnomaly',
+      kind: kind,
+      key: key || '',
+      text: String(text || '').slice(0, 500),
+      fingerprint: fingerprint(),
+      extra: extra || null
+    };
+    console.error('[咸强之王][CLIENT_ANOMALY]', kind, key, String(text||'').slice(0, 180));
+    try {
+      if (window.XyzwBridge && window.XyzwBridge.postMessage) {
+        window.XyzwBridge.postMessage(JSON.stringify(payload));
+      }
+    } catch (e) {}
+  }
+  function wrapConsole(name){
+    try {
+      var orig = console[name];
+      if (typeof orig !== 'function' || orig.__xyzwWrapped) return;
+      var wrapped = function(){
+        try {
+          var args = Array.prototype.slice.call(arguments);
+          var text = args.map(function(a){
+            try { return typeof a === 'string' ? a : JSON.stringify(a); }
+            catch (e) { return String(a); }
+          }).join(' ');
+          if (hit(text)) report('console.'+name, text);
+        } catch (e) {}
+        return orig.apply(console, arguments);
+      };
+      wrapped.__xyzwWrapped = true;
+      console[name] = wrapped;
+    } catch (e) {}
+  }
+  ['log','warn','error','info','debug'].forEach(wrapConsole);
+  try {
+    var _alert = window.alert;
+    window.alert = function(msg){
+      report('alert', msg);
+      return _alert.apply(this, arguments);
+    };
+  } catch (e) {}
+  try {
+    var _confirm = window.confirm;
+    window.confirm = function(msg){
+      report('confirm', msg);
+      return _confirm.apply(this, arguments);
+    };
+  } catch (e) {}
+  // DOM 文案（弹窗/toast）
+  try {
+    var mo = new MutationObserver(function(muts){
+      for (var i = 0; i < muts.length; i++) {
+        var nodes = muts[i].addedNodes || [];
+        for (var j = 0; j < nodes.length; j++) {
+          var n = nodes[j];
+          if (!n || n.nodeType !== 1) continue;
+          var t = (n.innerText || n.textContent || '').trim();
+          if (t && t.length < 800 && hit(t)) report('dom', t);
+        }
+      }
+    });
+    mo.observe(document.documentElement, { childList: true, subtree: true });
+  } catch (e) {}
+  // 前后台
+  document.addEventListener('visibilitychange', function(){
+    console.log('[咸强之王][lifecycle] visibility='+document.visibilityState+' hidden='+document.hidden);
+  });
+  window.addEventListener('pagehide', function(){
+    console.log('[咸强之王][lifecycle] pagehide');
+  });
+  window.addEventListener('pageshow', function(ev){
+    console.log('[咸强之王][lifecycle] pageshow persisted='+!!(ev&&ev.persisted));
+  });
+  // 启动后落一份指纹基线，比赛异常时可对照
+  setTimeout(function(){ report('fingerprint', 'baseline'); }, 3500);
+  console.log('[咸强之王] 客户端异常侦测已启动');
+})();
+''';
+
   /// 全局错误吞噬 + 安全剪贴板 + execCommand 兜底
   static const compat = r'''
 (function(){

@@ -26,14 +26,7 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
-	<!-- 启动即请求「本地网络」权限：本机 127.0.0.1 HTTP + WebView 加载游戏页 -->
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>需要访问本机本地服务以加载游戏页面；请点「允许」，否则进游戏会失败。</string>
-	<key>NSBonjourServices</key>
-	<array>
-		<string>_http._tcp</string>
-	</array>
-	<!-- 本地 HTTP + WebView 内游戏资源/接口 -->
+	<!-- 本地 HTTP + WebView 内游戏资源/接口（不声明 Bonjour，避免「查找本地网络设备」弹窗） -->
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>

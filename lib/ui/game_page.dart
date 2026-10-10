@@ -59,7 +59,7 @@ class _Session {
   String? error;
 }
 
-class GamePageState extends State<GamePage> {
+class GamePageState extends State<GamePage> with WidgetsBindingObserver {
   LocalHttpServer? _server;
   var _ownsServer = false;
   String? _baseUrl;
@@ -73,12 +73,15 @@ class GamePageState extends State<GamePage> {
   final Map<String, Timer> _binKeepAlive = {};
   final Map<String, String> _binB64Cache = {};
   final Map<String, Future<void>> _injectChain = {};
+  Timer? _sessionHeartbeat;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _activeId = widget.initialAccountId;
     widget.scripts.addListener(_onScripts);
+    _armSessionHeartbeat();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     SystemChrome.setSystemUIOverlayStyle(
       const SystemUiOverlayStyle(
@@ -170,6 +173,57 @@ class GamePageState extends State<GamePage> {
 
   Future<void> openAccount(String accountId) => _bootServerAndOpen(accountId);
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    AppLog.diag('lifecycle', {
+      'event': 'app',
+      'state': state.name,
+      'activeId': _activeId,
+      'sessions': _sessions.length,
+      'ids': _sessions.keys.join(','),
+    });
+    if (state == AppLifecycleState.resumed) {
+      // 回前台：只唤醒/探活，绝不自动 reload（避免比赛中切走再进整页重载）
+      unawaited(_pingAllSessions('resume'));
+    } else if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive) {
+      unawaited(_pingAllSessions('background'));
+    }
+  }
+
+  void _armSessionHeartbeat() {
+    _sessionHeartbeat?.cancel();
+    // 非前台会话也定时探活，减轻 iOS 对后台 WKWebView 的冻结感
+    _sessionHeartbeat = Timer.periodic(const Duration(seconds: 25), (_) {
+      if (!mounted || _sessions.isEmpty) return;
+      unawaited(_pingAllSessions('heartbeat'));
+    });
+  }
+
+  Future<void> _pingAllSessions(String reason) async {
+    for (final entry in _sessions.entries) {
+      final id = entry.key;
+      final c = entry.value.controller;
+      try {
+        await c.runJavaScript('''
+(function(){
+  try {
+    console.log('[咸强之王][keepalive] $reason id=$id vis='+(document.visibilityState||'')+
+      ' hidden='+!!document.hidden+
+      ' hasBuf='+!!(window.__activeBinBuf&&window.__activeBinBuf.byteLength)+
+      ' xhr='+!!window.__xhrIntercepted);
+    if (typeof window.__xyzwClientWatch === 'undefined') {
+      // 页面若被系统回收过脚本，由下次 pageFinished 再装；此处不强制 reload
+    }
+  } catch (e) {}
+})();
+''');
+      } catch (e) {
+        AppLog.w('keepalive', 'session=$id reason=$reason ping失败: $e');
+      }
+    }
+  }
+
   Future<void> closeAccount(String accountId) async {
     _readyTimers.remove(accountId)?.cancel();
     final s = _sessions.remove(accountId);
@@ -205,6 +259,13 @@ class GamePageState extends State<GamePage> {
 
   Future<void> _ensureSession(String accountId) async {
     if (_sessions.containsKey(accountId) || _bootingIds.contains(accountId)) {
+      // 已有会话：只切 IndexedStack，绝不 reload
+      AppLog.diag('game', {
+        'event': 'switch_session',
+        'accountId': accountId,
+        'alive': _sessions.containsKey(accountId),
+        'total': _sessions.length,
+      });
       if (mounted) setState(() => _activeId = accountId);
       return;
     }
@@ -251,14 +312,26 @@ class GamePageState extends State<GamePage> {
       );
       await controller.setOnConsoleMessage((m) {
         final text = m.message;
-        final important = text.contains('咸强之王') ||
+        final anomaly = text.contains('CLIENT_ANOMALY') ||
+            text.contains('客户端数据异常') ||
+            text.contains('官方最新客户端') ||
+            text.contains('客户端异常') ||
+            text.contains('数据异常');
+        final important = anomaly ||
+            text.contains('咸强之王') ||
             text.contains('BIN') ||
             text.contains('拦截') ||
+            text.contains('lifecycle') ||
             text.contains('login') ||
+            text.contains('WebSocket') ||
+            text.contains('踢') ||
             m.level == JavaScriptLogLevel.error ||
             m.level == JavaScriptLogLevel.warning;
         if (important) {
           AppLog.js('${m.level.name}: $text');
+        }
+        if (anomaly) {
+          AppLog.e('client', '[$accountId] console疑似客户端异常: $text');
         }
       });
 
@@ -287,6 +360,7 @@ class GamePageState extends State<GamePage> {
               await _queueInject(accountId, controller, account, 'page_finished');
               await controller.runJavaScript(
                 '${InjectScripts.vhFix}\n${InjectScripts.canvasGuard}\n'
+                '${InjectScripts.clientAnomalyWatch}\n'
                 '${InjectScripts.lateSdkReady}\nwindow.__xyzwRoleBridge=false;\n'
                 '${InjectScripts.roleBridge}\n${InjectScripts.gameReadyWatch}',
               );
@@ -511,9 +585,10 @@ class GamePageState extends State<GamePage> {
         ? 'http://127.0.0.1:$port/__xyzw/bin/$binName'
         : '/__xyzw/bin/$binName';
 
-    // xhrIntercept 自身幂等；页面重建后标志丢失会自动重装
+    // xhrIntercept / 异常侦测自身幂等；页面重建后标志丢失会自动重装
     await controller.runJavaScript(
-      '${InjectScripts.compat}\n${InjectScripts.xhrIntercept}',
+      '${InjectScripts.compat}\n${InjectScripts.xhrIntercept}\n'
+      '${InjectScripts.clientAnomalyWatch}',
     );
 
     // iOS：优先 Dart→base64 灌入缓冲；HTTP 拉取作备用
@@ -579,6 +654,33 @@ class GamePageState extends State<GamePage> {
       }
       if (type == 'gameReady') {
         _markReady(accountId);
+        return;
+      }
+      if (type == 'clientAnomaly') {
+        final kind = map['kind'] as String? ?? '';
+        final key = map['key'] as String? ?? '';
+        final text = map['text'] as String? ?? '';
+        final fp = map['fingerprint'];
+        if (kind == 'fingerprint') {
+          AppLog.diag('client', {
+            'event': 'fingerprint',
+            'accountId': accountId,
+            'fp': fp,
+          });
+        } else {
+          AppLog.e(
+            'client',
+            '[$accountId] 客户端异常 key=$key kind=$kind text=$text',
+          );
+          AppLog.diag('client', {
+            'event': 'anomaly',
+            'accountId': accountId,
+            'kind': kind,
+            'key': key,
+            'text': text,
+            'fp': fp,
+          });
+        }
         return;
       }
       if (type == 'role') {
@@ -787,7 +889,11 @@ class GamePageState extends State<GamePage> {
                               ),
                             ),
                             subtitle: Text(
-                              alive ? '已进入 · 点按切换' : '未进入 · 将重新加载',
+                              alive
+                                  ? (active
+                                      ? '当前前台 · 会话保活中'
+                                      : '后台运行中 · 点按秒切（不重载）')
+                                  : '未进入 · 将新建会话',
                               style: TextStyle(
                                 fontSize: 12,
                                 color: alive
@@ -821,7 +927,9 @@ class GamePageState extends State<GamePage> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     widget.scripts.removeListener(_onScripts);
+    _sessionHeartbeat?.cancel();
     for (final t in _readyTimers.values) {
       t.cancel();
     }
