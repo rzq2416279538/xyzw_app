@@ -36,7 +36,6 @@ class GamePage extends StatefulWidget {
     required this.status,
     required this.onBack,
     required this.visible,
-    required this.userClosed,
     this.onRunningChanged,
     this.httpServer,
   });
@@ -47,10 +46,8 @@ class GamePage extends StatefulWidget {
   final Directory rendererDir;
   final RendererStatus status;
   final VoidCallback onBack;
-  /// 是否盖在前台（false=已关游戏回首页，WebView 仍 Offstage 保活）
+  /// true=游戏盖在前台；false=已「返回」首页，会话 Offstage 继续跑
   final bool visible;
-  /// 用户点了顶栏返回（不是系统手势误关）
-  final bool userClosed;
   final ValueChanged<Set<String>>? onRunningChanged;
   final LocalHttpServer? httpServer;
 
@@ -242,23 +239,14 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
         state == AppLifecycleState.paused ||
         state == AppLifecycleState.hidden) {
       _backgroundedAt ??= DateTime.now();
-      // 有会话且用户没点返回 = 仍在玩（忽略 visible 被系统手势误改）
-      if (!_playingWhenBackgrounded &&
-          _sessions.isNotEmpty &&
-          !widget.userClosed) {
+      // 只要有会话就要保活：游戏内 / 返回首页运行中 都算
+      if (_sessions.isNotEmpty) {
         _playingWhenBackgrounded = true;
       }
-      if (state == AppLifecycleState.paused ||
-          state == AppLifecycleState.hidden) {
-        if (_playingWhenBackgrounded ||
-            (_sessions.isNotEmpty && !widget.userClosed)) {
-          _playingWhenBackgrounded = true;
-          unawaited(IosBgKeep.begin());
-        } else if (widget.userClosed && _sessions.isNotEmpty) {
-          // 用户点返回关游戏后再进后台：清会话，整页由 Home 卸载
-          unawaited(IosBgKeep.end());
-          _discardAllSessionsSync('background_while_minimized');
-        }
+      if ((state == AppLifecycleState.paused ||
+              state == AppLifecycleState.hidden) &&
+          _playingWhenBackgrounded) {
+        unawaited(IosBgKeep.begin());
       }
       return;
     }
@@ -266,33 +254,41 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
       final bg = _backgroundedAt;
       _backgroundedAt = null;
       final sec = bg == null ? 0 : DateTime.now().difference(bg).inSeconds;
-      final wasPlaying = _playingWhenBackgrounded;
+      final hadSessions = _playingWhenBackgrounded;
       _playingWhenBackgrounded = false;
       AppLog.diag('lifecycle', {
         'event': 'resumed_after',
         'sec': sec,
         'gameVisible': widget.visible,
-        'wasPlaying': wasPlaying,
+        'hadSessions': hadSessions,
         'sessions': _sessions.length,
       });
       unawaited(IosBgKeep.end());
-      if (wasPlaying && _sessions.isNotEmpty) {
-        // 加载过程中系统会闪 inactive/resumed（日志 17:45:07 sec=0），不要打断进号
-        if (sec < 3) {
-          AppLog.diag('lifecycle', {
-            'event': 'resume_skip_short',
-            'sec': sec,
-            'reason': 'likely_system_flicker',
-          });
-          return;
-        }
-        // 回前台仍停在游戏页；后台久了必须硬重建才能重新上线
+      if (!hadSessions || _sessions.isEmpty) return;
+      // 加载闪烁：短 resume 不打断
+      if (sec < 3) {
+        AppLog.diag('lifecycle', {
+          'event': 'resume_skip_short',
+          'sec': sec,
+        });
+        return;
+      }
+      if (widget.visible) {
+        // 需求1：游戏内回前台 → 恢复/硬重建，人还在游戏里
         unawaited(_resumeInGameSessions(sec));
-      } else if (sec >= 8 &&
-          widget.userClosed &&
-          _sessions.isNotEmpty) {
+      } else {
+        // 需求2：返回首页运行中再回 App → 先标脏，等再次「进入」时硬重建
+        // （Offstage 里重建易白屏；可见后再建）
         _httpSuspect = true;
-        _discardAllSessionsSync('resume_minimized_${sec}s');
+        if (sec >= 20) {
+          _staleSessionIds.addAll(_sessions.keys);
+          AppLog.w(
+            'lifecycle',
+            '后台 ${sec}s 且在首页保活，已标记 ${_staleSessionIds.length} 个会话待进入时重建',
+          );
+        } else {
+          unawaited(_ensureLocalHttpForResume());
+        }
       }
     }
   }
