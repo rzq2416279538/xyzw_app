@@ -1077,45 +1077,23 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
 
     final ids = _sessions.keys.toList();
 
-    // IndexedStack 不绘制未选中页 → iOS 会冻 WKWebView（活动停在切走时的进度）。
-    // 后台号仍按游戏区全尺寸布局，只露出 3px 以免被合成器剔除。
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final w = constraints.maxWidth;
-        final h = constraints.maxHeight;
-        return Stack(
-          fit: StackFit.expand,
-          clipBehavior: Clip.hardEdge,
-          children: [
-            for (final id in ids)
-              if (id == _activeId)
-                Positioned.fill(child: _sessionView(_sessions[id]!))
-              else
-                Positioned(
-                  left: 0,
-                  top: 0,
-                  width: 3,
-                  height: 3,
-                  child: ClipRect(
-                    child: OverflowBox(
-                      alignment: Alignment.topLeft,
-                      minWidth: w,
-                      maxWidth: w,
-                      minHeight: h,
-                      maxHeight: h,
-                      child: SizedBox(
-                        width: w,
-                        height: h,
-                        child: IgnorePointer(
-                          child: _sessionView(_sessions[id]!),
-                        ),
-                      ),
-                    ),
-                  ),
+    // 后台号铺在下层保活；当前号必须最后绘制，否则 WKWebView 会抢走点击
+    //（OverflowBox 露 3px 时原生视图仍是全屏，IgnorePointer 挡不住）。
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        for (final id in ids)
+          if (id != _activeId)
+            Positioned.fill(
+              child: IgnorePointer(
+                child: TickerMode(
+                  enabled: true,
+                  child: _sessionView(_sessions[id]!),
                 ),
-          ],
-        );
-      },
+              ),
+            ),
+        Positioned.fill(child: _sessionView(_sessions[_activeId]!)),
+      ],
     );
   }
 
