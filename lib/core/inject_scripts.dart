@@ -27,24 +27,52 @@ class InjectScripts {
             x.open('GET', url, false);
             x.overrideMimeType('text/plain; charset=x-user-defined');
             x.send(null);
-            if (x.status !== 200 || !x.responseText) return null;
+            if (x.status !== 200 || !x.responseText) {
+                console.warn('[咸强之王] BIN同步拉取失败 status='+x.status+' url='+url);
+                return null;
+            }
             var s = x.responseText;
             var u = new Uint8Array(s.length);
             for (var i = 0; i < s.length; i++) u[i] = s.charCodeAt(i) & 0xff;
             window.__activeBinBuf = u.buffer;
             return u.buffer;
-        } catch (e) { return null; }
+        } catch (e) {
+            console.warn('[咸强之王] BIN同步拉取异常', e && e.message || e);
+            return null;
+        }
     }
     XMLHttpRequest.prototype.send = function(b){
         if (this._isTarget) {
             var buf = window.__activeBinBuf || loadBinSync();
             if (buf) {
-                console.log('[咸强之王] 拦截XHR:', this._u);
+                console.log('[咸强之王] 拦截XHR:', this._u, 'binBytes='+(buf.byteLength||0));
                 return _send.call(this, buf);
             }
+            console.error('[咸强之王] 登录请求未替换BIN（缓冲为空）', this._u);
         }
         return _send.apply(this, arguments);
     };
+    // iOS WKWebView 上部分路径会走 fetch
+    try {
+      var _fetch = window.fetch;
+      if (typeof _fetch === 'function') {
+        window.fetch = function(input, init){
+          var url = (typeof input === 'string') ? input : (input && input.url) || '';
+          var method = ((init && init.method) || (input && input.method) || 'GET').toUpperCase();
+          var isTarget = method === 'POST' &&
+            /hortorgames\.com\/login\/(authuser|serverlist)/.test(url);
+          if (!isTarget) return _fetch.apply(this, arguments);
+          var buf = window.__activeBinBuf || loadBinSync();
+          if (!buf) {
+            console.error('[咸强之王] fetch登录未替换BIN', url);
+            return _fetch.apply(this, arguments);
+          }
+          console.log('[咸强之王] 拦截fetch:', url, 'binBytes='+buf.byteLength);
+          var next = Object.assign({}, init || {}, { method: 'POST', body: buf });
+          return _fetch.call(this, input, next);
+        };
+      }
+    } catch (e) {}
     console.log('[咸强之王] XHR拦截已启动');
 })();
 ''';
@@ -168,7 +196,7 @@ class InjectScripts {
 })();
 ''';
 
-  /// 把选中账号的 bin 写成 HTTP 地址，页面按需拉取，避免把整份 hex 塞进 evaluateJavascript。
+  /// 把选中账号的 bin 写成 HTTP 地址，页面按需拉取（备用）。
   static String activateBinUrl(String url, String label) {
     final safeUrl = url.replaceAll(r'\', r'\\').replaceAll("'", r"\'");
     final safeLabel = label.replaceAll(r'\', r'\\').replaceAll("'", r"\'");
@@ -180,13 +208,53 @@ class InjectScripts {
       x.open('GET', window.__xyzwBinUrl, true);
       x.responseType = 'arraybuffer';
       x.onload = function(){
-        if (x.status === 200 && x.response) window.__activeBinBuf = x.response;
+        if (x.status === 200 && x.response) {
+          window.__activeBinBuf = x.response;
+          console.log('[咸强之王] BIN异步拉取成功', x.response.byteLength);
+        } else {
+          console.warn('[咸强之王] BIN异步拉取失败', x.status, window.__xyzwBinUrl);
+        }
       };
+      x.onerror = function(){ console.warn('[咸强之王] BIN异步拉取网络错误', window.__xyzwBinUrl); };
       x.send();
-    } catch (e) {}
-    console.log('[咸强之王] 已注入BIN地址:', '$safeLabel');
+    } catch (e) { console.warn('[咸强之王] BIN异步拉取异常', e); }
+    console.log('[咸强之王] 已注入BIN地址:', '$safeLabel', window.__xyzwBinUrl);
 })();
 ''';
+  }
+
+  /// iOS 优先：由 Dart 注入 base64，不依赖 WKWebView 同步 XHR。
+  static String activateBinBase64(String base64, String label) {
+    final safeLabel = label.replaceAll(r'\', r'\\').replaceAll("'", r"\'");
+    // 分段，避免单次 evaluateJavascript 过长
+    const chunk = 240000;
+    final parts = <String>[];
+    for (var i = 0; i < base64.length; i += chunk) {
+      final end = (i + chunk < base64.length) ? i + chunk : base64.length;
+      parts.add(base64.substring(i, end));
+    }
+    final buf = StringBuffer()
+      ..writeln('(function(){')
+      ..writeln("window.__xyzwBinB64Parts=[];");
+    for (final p in parts) {
+      final safe = p.replaceAll(r'\', r'\\').replaceAll("'", r"\'");
+      buf.writeln("window.__xyzwBinB64Parts.push('$safe');");
+    }
+    buf.writeln('''
+try {
+  var b64 = window.__xyzwBinB64Parts.join('');
+  window.__xyzwBinB64Parts = null;
+  var bin = atob(b64);
+  var u = new Uint8Array(bin.length);
+  for (var i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+  window.__activeBinBuf = u.buffer;
+  console.log('[咸强之王] 已注入BIN缓冲', u.length, '$safeLabel');
+} catch (e) {
+  console.error('[咸强之王] BIN base64注入失败', e && e.message || e);
+}
+})();
+''');
+    return buf.toString();
   }
 
   /// 浅底 + 延后收起 Flutter 加载层，避免 canvas 仍黑时就露出黑屏。

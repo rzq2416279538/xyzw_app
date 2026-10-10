@@ -334,17 +334,45 @@ class GamePageState extends State<GamePage> {
   }
 
   Future<void> _injectEarly(WebViewController controller, Account account) async {
-    final binUrl =
-        '/__xyzw/bin/${LocalHttpServer.binFileName(account.id)}';
+    final port = _server?.port ?? 0;
+    final binName = LocalHttpServer.binFileName(account.id);
+    // 绝对地址用 127.0.0.1，避免 iOS localhost→IPv6
+    final binUrl = port > 0
+        ? 'http://127.0.0.1:$port/__xyzw/bin/$binName'
+        : '/__xyzw/bin/$binName';
+
     await controller.runJavaScript(
-      '${InjectScripts.compat}\n${InjectScripts.xhrIntercept}\n'
+      '${InjectScripts.compat}\n${InjectScripts.xhrIntercept}',
+    );
+
+    // iOS：优先 Dart→base64 灌入缓冲；HTTP 拉取作备用
+    try {
+      final file = File(
+        '${widget.rendererDir.path}${Platform.pathSeparator}__xyzw_bins'
+        '${Platform.pathSeparator}$binName.bin',
+      );
+      if (await file.exists()) {
+        final bytes = await file.readAsBytes();
+        final b64 = base64Encode(bytes);
+        await controller.runJavaScript(
+          InjectScripts.activateBinBase64(b64, account.fileLabel),
+        );
+        AppLog.i('game', 'BIN缓冲注入成功 ${account.fileLabel} ${bytes.length}B');
+      } else {
+        AppLog.w('game', 'BIN文件不存在，回退HTTP $binUrl');
+      }
+    } catch (e) {
+      AppLog.w('game', 'BIN缓冲注入失败，回退HTTP: $e');
+    }
+
+    await controller.runJavaScript(
       '${InjectScripts.activateBinUrl(binUrl, account.fileLabel)}\n'
       '${InjectScripts.gameReadyWatch}',
     );
     if (kDebugMode) {
       await controller.runJavaScript(InjectScripts.hsdkProbe);
     }
-    AppLog.i('game', 'BIN地址注入成功 ${account.fileLabel}');
+    AppLog.i('game', 'BIN地址注入成功 ${account.fileLabel} → $binUrl');
   }
 
   void _onBridge(String accountId, String raw) {

@@ -17,7 +17,10 @@ class LocalHttpServer {
   ReceivePort? _inbox;
   int port = 0;
 
-  String get baseUrl => 'http://localhost:$port';
+  /// iOS：必须用 127.0.0.1（localhost 常走 IPv6 ::1，服务只听 IPv4）。
+  /// Android：保留 localhost，兼容部分油猴脚本白名单。
+  String get baseUrl =>
+      Platform.isIOS ? 'http://127.0.0.1:$port' : 'http://localhost:$port';
 
   static String binFileName(String accountId) {
     final safe = accountId.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
