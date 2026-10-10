@@ -216,7 +216,9 @@ class _HomePageState extends State<HomePage> {
       });
       return;
     }
+    // 先显示游戏层再 open：后台恢复时要销毁重建 WebView，需挂在树上
     setState(() => _gameVisible = true);
+    await Future<void>.delayed(Duration.zero);
     await _gameKey.currentState?.openAccount(accountId);
   }
 
