@@ -34,6 +34,7 @@ class GamePage extends StatefulWidget {
     required this.rendererDir,
     required this.status,
     required this.onBack,
+    required this.visible,
     this.onRunningChanged,
     this.httpServer,
   });
@@ -44,6 +45,8 @@ class GamePage extends StatefulWidget {
   final Directory rendererDir;
   final RendererStatus status;
   final VoidCallback onBack;
+  /// 是否盖在前台（false=已关游戏回首页，WebView 仍 Offstage 保活）
+  final bool visible;
   final ValueChanged<Set<String>>? onRunningChanged;
   final LocalHttpServer? httpServer;
 
@@ -246,22 +249,35 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
       final bg = _backgroundedAt;
       _backgroundedAt = null;
       final sec = bg == null ? 0 : DateTime.now().difference(bg).inSeconds;
-      AppLog.diag('lifecycle', {'event': 'resumed_after', 'sec': sec});
-      // ≥8s：标脏并销毁重建 WKWebView（reload/JS 探活救不了白屏）。
-      if (sec >= 8) {
+      AppLog.diag('lifecycle', {
+        'event': 'resumed_after',
+        'sec': sec,
+        'gameVisible': widget.visible,
+        'sessions': _sessions.length,
+      });
+      // 复现差异：
+      // - 停在游戏内后台再回：画面正常，不要动
+      // - 先关游戏(Offstage)再后台：会话已死；此时重建会在不可见时加载→白屏
+      //   正确做法：直接丢掉死会话，等用户再次进入时在可见状态下新建
+      if (sec >= 8 && !widget.visible && _sessions.isNotEmpty) {
         _httpSuspect = true;
-        _staleSessionIds.addAll(_sessions.keys);
+        final ids = _sessions.keys.toList(growable: false);
         AppLog.w(
           'lifecycle',
-          '后台 ${sec}s，已标记 ${_staleSessionIds.length} 个会话待重建',
+          '后台 ${sec}s 且游戏已关闭，丢弃 ${ids.length} 个 Offstage 会话',
         );
-        final id = _activeId;
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!mounted || !_staleSessionIds.contains(id)) return;
-          unawaited(restartAccount(id));
-        });
+        unawaited(_purgeSessionsForResume(ids));
       }
     }
+  }
+
+  Future<void> _purgeSessionsForResume(List<String> ids) async {
+    for (final id in ids) {
+      await _dropSession(id);
+    }
+    _staleSessionIds.clear();
+    if (mounted) setState(() {});
+    _emitRunning();
   }
 
   void _armSessionHeartbeat() {

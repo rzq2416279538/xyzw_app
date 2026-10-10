@@ -477,6 +477,7 @@ class _HomePageState extends State<HomePage> {
                 rendererDir: dir,
                 status: status,
                 httpServer: _http,
+                visible: _gameVisible,
                 onBack: _minimizeGame,
                 onRunningChanged: (ids) {
                   if (!mounted) return;
