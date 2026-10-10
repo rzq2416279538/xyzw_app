@@ -75,6 +75,10 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
   final Map<String, String> _binB64Cache = {};
   final Map<String, Future<void>> _injectChain = {};
   Timer? _sessionHeartbeat;
+  DateTime? _backgroundedAt;
+  /// 进过后台较久：再进游戏时必须探活，假死则 reload（避免白屏卡死）
+  var _resumeMayBeStale = false;
+  final Set<String> _recoveringIds = {};
 
   @override
   void initState() {
@@ -183,28 +187,45 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
       'sessions': _sessions.length,
       'ids': _sessions.keys.join(','),
     });
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden) {
+      _backgroundedAt ??= DateTime.now();
+      return;
+    }
+    if (state == AppLifecycleState.inactive) {
+      // iOS 切控制中心也会 inactive，先记时间但不立刻当假死
+      _backgroundedAt ??= DateTime.now();
+      return;
+    }
     if (state == AppLifecycleState.resumed) {
-      // 回前台：只唤醒/探活，绝不自动 reload（避免比赛中切走再进整页重载）
-      unawaited(_pingAllSessions('resume'));
-    } else if (state == AppLifecycleState.paused ||
-        state == AppLifecycleState.inactive) {
-      unawaited(_pingAllSessions('background'));
+      final bg = _backgroundedAt;
+      _backgroundedAt = null;
+      final sec = bg == null ? 0 : DateTime.now().difference(bg).inSeconds;
+      AppLog.diag('lifecycle', {'event': 'resumed_after', 'sec': sec});
+      // iOS 挂起一会儿后 WKWebView/WebGL/WS 常已死；软 resume 不够 → 探活后必要时 reload
+      if (sec >= 8) {
+        _resumeMayBeStale = true;
+        unawaited(_recoverStaleSessions(reason: 'app_resume_${sec}s'));
+      } else {
+        unawaited(_pingAllSessions('resume'));
+      }
     }
   }
 
   void _armSessionHeartbeat() {
     _sessionHeartbeat?.cancel();
-    // 非前台会话也定时探活，减轻 iOS 对后台 WKWebView 的冻结感
-    _sessionHeartbeat = Timer.periodic(const Duration(seconds: 8), (_) {
+    // 仅轻量探活当前号；假死恢复走 lifecycle / 再进游戏
+    _sessionHeartbeat = Timer.periodic(const Duration(seconds: 20), (_) {
       if (!mounted || _sessions.isEmpty) return;
       unawaited(_pingAllSessions('heartbeat'));
     });
   }
 
   Future<void> _pingAllSessions(String reason) async {
-    for (final entry in _sessions.entries) {
-      final id = entry.key;
-      final c = entry.value.controller;
+    final ids = <String>[_activeId, ..._sessions.keys.where((k) => k != _activeId)];
+    for (final id in ids) {
+      final c = _sessions[id]?.controller;
+      if (c == null) continue;
       try {
         await c.runJavaScript('''
 (function(){
@@ -215,7 +236,7 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
       } catch (e0) { try { cc.game.resume(); } catch (e1) {} }
     }
     console.log('[咸强之王][keepalive] $reason id=$id vis='+(document.visibilityState||'')+
-      ' hidden='+!!document.hidden+' paused='+(window.cc&&cc.game&&cc.game.isPaused&&cc.game.isPaused()));
+      ' hidden='+!!document.hidden);
   } catch (e) {}
 })();
 ''');
@@ -223,6 +244,68 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
         AppLog.w('keepalive', 'session=$id reason=$reason ping失败: $e');
       }
     }
+  }
+
+  /// 探活：canvas/Cocos 是否还在；失败或超时视为假死。
+  Future<bool> _probeSessionAlive(String accountId) async {
+    final s = _sessions[accountId];
+    if (s == null) return false;
+    try {
+      final raw = await s.controller
+          .runJavaScriptReturningResult(r'''
+(function(){
+  try {
+    var href = String(location.href || '');
+    if (!href || href.indexOf('about:blank') >= 0) {
+      return JSON.stringify({ok:false, reason:'blank'});
+    }
+    var c = document.getElementById('GameCanvas') || document.querySelector('canvas');
+    var w = c && (c.width || 0), h = c && (c.height || 0);
+    var sized = !!(c && w > 8 && h > 8);
+    var ccOk = !!(window.cc && cc.game);
+    var glOk = true;
+    try {
+      if (c && c.getContext) {
+        var gl = c.getContext('webgl') || c.getContext('experimental-webgl');
+        if (gl && gl.isContextLost && gl.isContextLost()) glOk = false;
+      }
+    } catch (e0) {}
+    var ok = (sized || ccOk) && glOk;
+    return JSON.stringify({ok:ok, sized:sized, cc:ccOk, glOk:glOk, w:w||0, h:h||0});
+  } catch (e) {
+    return JSON.stringify({ok:false, reason:String(e && e.message || e)});
+  }
+})()
+''')
+          .timeout(const Duration(seconds: 3));
+      final text = raw.toString();
+      AppLog.diag('lifecycle', {
+        'event': 'probe',
+        'accountId': accountId,
+        'result': text,
+      });
+      return text.contains('"ok":true');
+    } catch (e) {
+      AppLog.w('lifecycle', 'probe失败 $accountId: $e');
+      return false;
+    }
+  }
+
+  Future<void> _recoverStaleSessions({required String reason}) async {
+    if (!mounted || _sessions.isEmpty) return;
+    // 先保当前前台号
+    final active = _activeId;
+    if (_sessions.containsKey(active)) {
+      final ok = await _probeSessionAlive(active);
+      if (!ok) {
+        AppLog.w('lifecycle', '假死恢复 reload active=$active reason=$reason');
+        await restartAccount(active);
+      } else {
+        await _pingAllSessions('resume_ok');
+      }
+    }
+    // 后台号标脏：下次切过去再探活
+    _resumeMayBeStale = true;
   }
 
   Future<void> closeAccount(String accountId) async {
@@ -242,32 +325,61 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
   }
 
   Future<void> restartAccount(String accountId) async {
+    if (_recoveringIds.contains(accountId)) return;
     if (_sessions.containsKey(accountId)) {
+      _recoveringIds.add(accountId);
       final session = _sessions[accountId]!;
-      // 先盖加载层再 reload，避免黑屏闪一下
-      session.loading = true;
-      if (mounted) setState(() => _activeId = accountId);
-      await Future<void>.delayed(Duration.zero);
-      await _stageBin(accountId);
-      if (!_scriptsReady) await _publishScripts();
-      _armReadyWatch(accountId);
-      // reload 复用 HTTP 磁盘缓存；带新 t= 的 loadRequest 会逼整页重下
-      await session.controller.reload();
+      try {
+        // 先盖加载层再 reload，避免黑屏闪一下
+        session.loading = true;
+        session.error = null;
+        if (mounted) setState(() => _activeId = accountId);
+        await Future<void>.delayed(Duration.zero);
+        // 确保本地 HTTP 还活着（极端情况下 isolate 可能已挂）
+        if (_server == null || _server!.port == 0 || _baseUrl == null) {
+          AppLog.w('lifecycle', 'reload 前本地 HTTP 不可用，尝试重启服务');
+          await _bootServerAndOpen(accountId);
+          return;
+        }
+        await _stageBin(accountId);
+        if (!_scriptsReady) await _publishScripts();
+        _armReadyWatch(accountId);
+        // reload 复用 HTTP 磁盘缓存；带新 t= 的 loadRequest 会逼整页重下
+        await session.controller.reload();
+        AppLog.i('lifecycle', '会话已 reload $accountId');
+      } finally {
+        _recoveringIds.remove(accountId);
+      }
       return;
     }
     await openAccount(accountId);
   }
 
   Future<void> _ensureSession(String accountId) async {
-    if (_sessions.containsKey(accountId) || _bootingIds.contains(accountId)) {
-      // 已有会话：只切 IndexedStack，绝不 reload
+    if (_bootingIds.contains(accountId) || _recoveringIds.contains(accountId)) {
+      if (mounted) setState(() => _activeId = accountId);
+      return;
+    }
+    if (_sessions.containsKey(accountId)) {
+      // 已有会话：先切过去；若刚从后台回来则探活，假死则 reload（修白屏）
       AppLog.diag('game', {
         'event': 'switch_session',
         'accountId': accountId,
-        'alive': _sessions.containsKey(accountId),
+        'stale': _resumeMayBeStale,
         'total': _sessions.length,
       });
       if (mounted) setState(() => _activeId = accountId);
+      // 仅在「进过后台」后探活，避免普通切号每次多等 3s
+      if (_resumeMayBeStale) {
+        final ok = await _probeSessionAlive(accountId);
+        if (!ok) {
+          AppLog.w('game', '切换到假死会话，自动重载 $accountId');
+          await restartAccount(accountId);
+          return;
+        }
+        _resumeMayBeStale = false;
+      }
+      unawaited(_pingAllSessions('switch'));
       return;
     }
     final account = widget.store.byId(accountId);
