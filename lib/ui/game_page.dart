@@ -70,6 +70,9 @@ class GamePageState extends State<GamePage> {
   Future<void> _publishChain = Future<void>.value();
   var _scriptsReady = false;
   final Map<String, Timer> _readyTimers = {};
+  final Map<String, Timer> _binKeepAlive = {};
+  final Map<String, String> _binB64Cache = {};
+  final Map<String, Future<void>> _injectChain = {};
 
   @override
   void initState() {
@@ -268,7 +271,8 @@ class GamePageState extends State<GamePage> {
               'url': url,
               'ms': sw.elapsedMilliseconds,
             });
-            _injectEarly(controller, account);
+            // 串行注入，避免与 pageFinished 抢跑把 BIN 冲掉
+            unawaited(_queueInject(accountId, controller, account, 'page_started'));
           },
           onPageFinished: (url) async {
             AppLog.diag('game', {
@@ -279,12 +283,15 @@ class GamePageState extends State<GamePage> {
             });
             AppLog.i('game', 'HTTP加载完成: $_baseUrl ($accountId)');
             try {
+              // 日志根因：page_finished 后 hasBuf/xhr 变 false，登录未拦截 → roleId=0
+              await _queueInject(accountId, controller, account, 'page_finished');
               await controller.runJavaScript(
                 '${InjectScripts.vhFix}\n${InjectScripts.canvasGuard}\n'
                 '${InjectScripts.lateSdkReady}\nwindow.__xyzwRoleBridge=false;\n'
                 '${InjectScripts.roleBridge}\n${InjectScripts.gameReadyWatch}',
               );
-              await _probeBinState(controller, accountId, 'page_finished');
+              await _probeBinState(controller, accountId, 'page_finished_after');
+              _armBinKeepAlive(accountId, controller, account);
             } catch (e) {
               AppLog.e('game', '晚注入失败: $e');
               _markReady(accountId);
@@ -439,7 +446,64 @@ class GamePageState extends State<GamePage> {
     if (mounted) setState(() {});
   }
 
-  Future<void> _injectEarly(WebViewController controller, Account account) async {
+  Future<void> _queueInject(
+    String accountId,
+    WebViewController controller,
+    Account account,
+    String phase,
+  ) {
+    final prev = _injectChain[accountId] ?? Future<void>.value();
+    final next = prev
+        .catchError((Object _) {})
+        .then((_) => _injectBinAndHooks(controller, account, phase));
+    _injectChain[accountId] = next;
+    return next;
+  }
+
+  void _armBinKeepAlive(
+    String accountId,
+    WebViewController controller,
+    Account account,
+  ) {
+    _binKeepAlive.remove(accountId)?.cancel();
+    var ticks = 0;
+    _binKeepAlive[accountId] = Timer.periodic(const Duration(seconds: 2), (t) {
+      ticks++;
+      if (ticks > 12 || !_sessions.containsKey(accountId)) {
+        t.cancel();
+        _binKeepAlive.remove(accountId);
+        return;
+      }
+      unawaited(() async {
+        try {
+          final raw = await controller.runJavaScriptReturningResult(r'''
+(function(){
+  var buf = window.__activeBinBuf;
+  return JSON.stringify({
+    hasBuf: !!buf,
+    bytes: buf && buf.byteLength || 0,
+    xhr: !!window.__xhrIntercepted
+  });
+})()
+''');
+          final text = raw.toString();
+          final need = text.contains('"hasBuf":false') ||
+              text.contains('"xhr":false') ||
+              text.contains('"bytes":0');
+          if (need) {
+            AppLog.w('game', 'BIN保活补注 #$ticks $accountId $text');
+            await _queueInject(accountId, controller, account, 'keepalive_$ticks');
+          }
+        } catch (_) {}
+      }());
+    });
+  }
+
+  Future<void> _injectBinAndHooks(
+    WebViewController controller,
+    Account account,
+    String phase,
+  ) async {
     final port = _server?.port ?? 0;
     final binName = LocalHttpServer.binFileName(account.id);
     // 绝对地址用 127.0.0.1，避免 iOS localhost→IPv6
@@ -447,23 +511,34 @@ class GamePageState extends State<GamePage> {
         ? 'http://127.0.0.1:$port/__xyzw/bin/$binName'
         : '/__xyzw/bin/$binName';
 
+    // xhrIntercept 自身幂等；页面重建后标志丢失会自动重装
     await controller.runJavaScript(
       '${InjectScripts.compat}\n${InjectScripts.xhrIntercept}',
     );
 
     // iOS：优先 Dart→base64 灌入缓冲；HTTP 拉取作备用
     try {
-      final file = File(
-        '${widget.rendererDir.path}${Platform.pathSeparator}__xyzw_bins'
-        '${Platform.pathSeparator}$binName.bin',
-      );
-      if (await file.exists()) {
-        final bytes = await file.readAsBytes();
-        final b64 = base64Encode(bytes);
+      var b64 = _binB64Cache[account.id];
+      if (b64 == null) {
+        final file = File(
+          '${widget.rendererDir.path}${Platform.pathSeparator}__xyzw_bins'
+          '${Platform.pathSeparator}$binName.bin',
+        );
+        if (await file.exists()) {
+          final bytes = await file.readAsBytes();
+          b64 = base64Encode(bytes);
+          _binB64Cache[account.id] = b64;
+        }
+      }
+      if (b64 != null) {
         await controller.runJavaScript(
           InjectScripts.activateBinBase64(b64, account.fileLabel),
         );
-        AppLog.i('game', 'BIN缓冲注入成功 ${account.fileLabel} ${bytes.length}B');
+        AppLog.i(
+          'game',
+          'BIN缓冲注入成功[$phase] ${account.fileLabel} '
+          '${(b64.length * 3) ~/ 4}B(approx)',
+        );
       } else {
         AppLog.w('game', 'BIN文件不存在，回退HTTP $binUrl');
       }
@@ -475,11 +550,11 @@ class GamePageState extends State<GamePage> {
       '${InjectScripts.activateBinUrl(binUrl, account.fileLabel)}\n'
       '${InjectScripts.gameReadyWatch}',
     );
-    await _probeBinState(controller, account.id, 'inject_early');
-    if (kDebugMode) {
+    await _probeBinState(controller, account.id, 'inject_$phase');
+    if (kDebugMode && phase == 'page_started') {
       await controller.runJavaScript(InjectScripts.hsdkProbe);
     }
-    AppLog.i('game', 'BIN地址注入成功 ${account.fileLabel} → $binUrl');
+    AppLog.i('game', 'BIN地址注入成功[$phase] ${account.fileLabel} → $binUrl');
   }
 
   void _onBridge(String accountId, String raw) {
@@ -751,6 +826,10 @@ class GamePageState extends State<GamePage> {
       t.cancel();
     }
     _readyTimers.clear();
+    for (final t in _binKeepAlive.values) {
+      t.cancel();
+    }
+    _binKeepAlive.clear();
     if (_ownsServer) unawaited(_server?.stop());
     _sessions.clear();
     SystemChrome.setSystemUIOverlayStyle(

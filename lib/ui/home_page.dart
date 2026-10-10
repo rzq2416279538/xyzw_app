@@ -5,6 +5,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 
 import '../core/app_log.dart';
+import '../core/ios_network_gate.dart';
 import '../core/local_http_server.dart';
 import '../core/renderer_cache.dart';
 import '../core/renderer_status.dart';
@@ -119,6 +120,15 @@ class _HomePageState extends State<HomePage> {
       RendererWarmup.prefetch(base, dir).then((_) {
         AppLog.i('boot', '资源预热完成 ${sw.elapsedMilliseconds}ms');
       });
+      // iOS：启动立刻做联网/本地网络预检，避免导入时才弹系统权限导致失败
+      if (Platform.isIOS) {
+        // ignore: unawaited_futures
+        Future<void>(() async {
+          await IosNetworkGate.warmUp();
+          if (!mounted) return;
+          await IosNetworkGate.ensureReady(context);
+        });
+      }
     } catch (e, st) {
       AppLog.e('boot', '首页初始化失败 $e\n$st');
       if (!mounted) return;
@@ -158,8 +168,13 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  void _openImport() {
-    Navigator.of(context).push(
+  Future<void> _openImport() async {
+    if (Platform.isIOS) {
+      final ok = await IosNetworkGate.ensureReady(context);
+      if (!ok || !mounted) return;
+    }
+    if (!mounted) return;
+    await Navigator.of(context).push(
       CupertinoPageRoute<void>(
         builder: (_) => ImportPage(store: widget.store),
       ),
@@ -176,6 +191,10 @@ class _HomePageState extends State<HomePage> {
     final dir = _rendererDir;
     final status = _status;
     if (account == null || dir == null || status == null) return;
+    if (Platform.isIOS) {
+      final ok = await IosNetworkGate.ensureReady(context);
+      if (!ok || !mounted) return;
+    }
     AppLog.diag('ui', {
       'event': 'start_game',
       'accountId': accountId,

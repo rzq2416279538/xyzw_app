@@ -5,20 +5,50 @@
 class InjectScripts {
   InjectScripts._();
 
-  /// 登录请求体替换：把发往登录接口的 POST body 换成当前账号 bin
+  /// 登录请求体替换：把发往登录接口的 POST body 换成当前账号 bin。
+  /// iOS WKWebView 可能在 pageStarted→finished 间丢 window 状态，故用 sessionStorage 兜底。
   static const xhrIntercept = r'''
 (function(){
-    if(window.__xhrIntercepted) return;
+    function b64ToBuf(b64){
+        if (!b64) return null;
+        try {
+            var bin = atob(b64);
+            var u = new Uint8Array(bin.length);
+            for (var i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+            return u.buffer;
+        } catch (e) { return null; }
+    }
+    function restoreFromStorage(){
+        try {
+            var b64 = sessionStorage.getItem('__xyzwBinB64');
+            var url = sessionStorage.getItem('__xyzwBinUrl');
+            if (url && !window.__xyzwBinUrl) window.__xyzwBinUrl = url;
+            if (b64 && !window.__activeBinBuf) {
+                var buf = b64ToBuf(b64);
+                if (buf) {
+                    window.__activeBinBuf = buf;
+                    console.log('[咸强之王] BIN从sessionStorage恢复', buf.byteLength);
+                }
+            }
+        } catch (e) {}
+    }
+    restoreFromStorage();
+    if(window.__xhrIntercepted) {
+        restoreFromStorage();
+        return;
+    }
     window.__xhrIntercepted = true;
     var _open = XMLHttpRequest.prototype.open;
     var _send = XMLHttpRequest.prototype.send;
     XMLHttpRequest.prototype.open = function(m, u){
         this._m = m; this._u = u;
         this._isTarget = (m === 'POST' &&
-            /hortorgames\.com\/login\/(authuser|serverlist)/.test(u));
+            /hortorgames\.com\/login\/(authuser|serverlist)/.test(String(u||'')));
         return _open.apply(this, arguments);
     };
     function loadBinSync(){
+        if (window.__activeBinBuf) return window.__activeBinBuf;
+        restoreFromStorage();
         if (window.__activeBinBuf) return window.__activeBinBuf;
         var url = window.__xyzwBinUrl;
         if (!url) return null;
@@ -55,12 +85,12 @@ class InjectScripts {
     // iOS WKWebView 上部分路径会走 fetch
     try {
       var _fetch = window.fetch;
-      if (typeof _fetch === 'function') {
-        window.fetch = function(input, init){
+      if (typeof _fetch === 'function' && !_fetch.__xyzwLoginHook) {
+        var hooked = function(input, init){
           var url = (typeof input === 'string') ? input : (input && input.url) || '';
           var method = ((init && init.method) || (input && input.method) || 'GET').toUpperCase();
           var isTarget = method === 'POST' &&
-            /hortorgames\.com\/login\/(authuser|serverlist)/.test(url);
+            /hortorgames\.com\/login\/(authuser|serverlist)/.test(String(url||''));
           if (!isTarget) return _fetch.apply(this, arguments);
           var buf = window.__activeBinBuf || loadBinSync();
           if (!buf) {
@@ -71,6 +101,8 @@ class InjectScripts {
           var next = Object.assign({}, init || {}, { method: 'POST', body: buf });
           return _fetch.call(this, input, next);
         };
+        hooked.__xyzwLoginHook = true;
+        window.fetch = hooked;
       }
     } catch (e) {}
     console.log('[咸强之王] XHR拦截已启动');
@@ -203,6 +235,7 @@ class InjectScripts {
     return '''
 (function(){
     window.__xyzwBinUrl = '$safeUrl';
+    try { sessionStorage.setItem('__xyzwBinUrl', window.__xyzwBinUrl); } catch (e0) {}
     try {
       var x = new XMLHttpRequest();
       x.open('GET', window.__xyzwBinUrl, true);
@@ -244,6 +277,7 @@ class InjectScripts {
 try {
   var b64 = window.__xyzwBinB64Parts.join('');
   window.__xyzwBinB64Parts = null;
+  try { sessionStorage.setItem('__xyzwBinB64', b64); } catch (e0) {}
   var bin = atob(b64);
   var u = new Uint8Array(bin.length);
   for (var i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);

@@ -61,18 +61,38 @@ flutter run -d <iphone>
 # 或使用仓库 Actions：iOS Unsigned IPA
 ```
 
-### 基本流程
+### 基本流程（iOS）
 
-1. 检查 renderer 就绪  
-2. 导入角色  
-3. 点账号 → 启动 / 进入  
-4. 需要时在「脚本管理」导入并开启脚本  
+1. **首次打开**：若弹出「本地网络 / 无线局域网」请点 **允许**（启动时会主动触发，勿等到导入时再点）  
+2. 检查 renderer 就绪  
+3. 导入角色  
+4. 点账号 → 启动 / 进入  
+5. 需要时在「脚本管理」导入并开启脚本  
 
 ### 反馈问题（iOS）
 
 1. 复现后点首页 **导出日志**  
 2. 日志在「文件」App → 我的 iPhone → 咸强之王（`咸强之王-日志-*.txt` / `xyzw_latest.log`），并已复制到剪贴板  
-3. 将日志发给开发者；优先搜索 `[DIAG]`、`[game]`、`BIN`、`拦截`  
+3. 将日志发给开发者；优先搜索 `[DIAG]`、`拦截XHR`、`BIN`、`roleId`  
+
+## 无自有服务器时的「在线更新」
+
+库存 iOS **不能**像安卓那样静默覆盖安装（无企业签 / MDM / 越狱时）。没有自己的后台也能用这些免费托管：
+
+| 方案 | 要不要服务器 | 体验 | 说明 |
+| --- | --- | --- | --- |
+| **GitHub Releases** | 否（用 GitHub） | 手动下 IPA → 自签安装 | Actions 产物挂 Release；改版只发新包 |
+| **SideStore / AltStore 源** | 否（源 JSON 可放 GitHub Pages） | 手机里点更新 | 适合长期自用；需电脑/VPN 刷新签名 |
+| **TestFlight** | 否（Apple 托管） | 接近自动更新 | 需 **99 美元/年** Apple 开发者账号 |
+| **Diawi / Installonair 等** | 否（第三方托管） | 扫码安装 | 链接有时效；仍要签名有效 |
+
+推荐路径（无服务器、无付费账号）：
+
+1. Actions 打未签名 IPA → 上传到 **GitHub Release**  
+2. 本机自签安装；有 SideStore 时可加一个 **AltStore 源**（一个 JSON，托管在 GitHub Pages）方便以后点更新  
+3. 后续可在 App 内加「检查更新」：读 GitHub 上的 `version.json`（仍零服务器）
+
+**结论**：没有后台也能「在线发版」；真正「打开 App 自动装上新版本」在未越狱 iOS 上做不到，除非 TestFlight / 企业签 / 系统级安装渠道。
 
 ## 说明
 
