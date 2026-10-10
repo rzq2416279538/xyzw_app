@@ -95,7 +95,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         'gameVisible': _gameVisible,
         'gameMounted': _gameMounted,
       });
-      if (sec >= 8) {
+      // 关游戏进过后台：回前台先把本地 HTTP 拉活，再进游戏才不会 -1004 白屏
+      if (!_gameVisible || sec >= 8) {
         unawaited(_ensureHttpAlive());
       }
     }

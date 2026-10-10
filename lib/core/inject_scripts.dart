@@ -416,7 +416,7 @@ class InjectScripts {
 ''';
 
   /// 应用内切号时，阻止 Page Visibility / Cocos 把后台会话暂停。
-  /// （切到别的 App 仍受 iOS 进程挂起限制，壳无法对抗。）
+  /// （切到别的 App 仍受 iOS 进程挂起限制；回前台由 [foregroundResume] 触发 onShow/重连。）
   static const visibilityKeepAlive = r'''
 (function(){
   if (window.__xyzwVisKeep) return;
@@ -483,6 +483,81 @@ class InjectScripts {
     keepCocos();
   }, 4000);
   console.log('[咸强之王][keepalive] 可见性冻结已安装');
+})();
+''';
+
+  /// 收集 wx.onShow/onHide，供 Flutter 回前台时主动触发（游戏常在 onShow 里重连）。
+  static const appLifecycleBridge = r'''
+(function(){
+  if (window.__xyzwLifeBridge) return;
+  window.__xyzwLifeBridge = true;
+  var shows = [];
+  var hides = [];
+  function wrapWx(){
+    try {
+      var wx = window.wx || (window.wx = {});
+      if (wx.__xyzwShowWrapped) return;
+      var prevShow = wx.onShow;
+      var prevHide = wx.onHide;
+      wx.onShow = function(cb){
+        if (typeof cb === 'function') shows.push(cb);
+        if (typeof prevShow === 'function') {
+          try { prevShow.call(wx, cb); } catch (e) {}
+        }
+      };
+      wx.onHide = function(cb){
+        if (typeof cb === 'function') hides.push(cb);
+        if (typeof prevHide === 'function') {
+          try { prevHide.call(wx, cb); } catch (e) {}
+        }
+      };
+      wx.__xyzwShowWrapped = true;
+    } catch (e) {}
+  }
+  wrapWx();
+  var n = 0;
+  var iv = setInterval(function(){
+    wrapWx();
+    if (++n > 80) clearInterval(iv);
+  }, 200);
+  window.__xyzwFireShow = function(){
+    console.log('[咸强之王][lifecycle] fire onShow n='+shows.length);
+    var payload = { scene: '0', query: {}, shareTicket: [] };
+    shows.slice().forEach(function(cb){
+      try { cb(payload); } catch (e) {}
+    });
+  };
+  window.__xyzwFireHide = function(){
+    console.log('[咸强之王][lifecycle] fire onHide n='+hides.length);
+    hides.slice().forEach(function(cb){
+      try { cb(); } catch (e) {}
+    });
+  };
+})();
+''';
+
+  /// Flutter App 从后台回到游戏页：恢复 Cocos + 触发 onShow + 尝试网络重连。
+  static const foregroundResume = r'''
+(function(){
+  try {
+    if (typeof window.__xyzwFireShow === 'function') window.__xyzwFireShow();
+  } catch (e0) {}
+  try {
+    if (window.cc && cc.game && typeof cc.game.resume === 'function') cc.game.resume();
+    if (window.cc && cc.director && typeof cc.director.resume === 'function') cc.director.resume();
+  } catch (e1) {}
+  try { window.dispatchEvent(new Event('online')); } catch (e2) {}
+  try {
+    var cands = [window.Network, window.network, window.g_network, window.net, window.GameNet];
+    for (var i = 0; i < cands.length; i++) {
+      var n = cands[i];
+      if (!n) continue;
+      if (typeof n.reconnect === 'function') { n.reconnect(); console.log('[咸强之王][lifecycle] reconnect', i); }
+      else if (typeof n.reConnect === 'function') { n.reConnect(); }
+      else if (typeof n.connect === 'function') { n.connect(); }
+    }
+  } catch (e3) {}
+  console.log('[咸强之王][lifecycle] foregroundResume done');
 })();
 ''';
 

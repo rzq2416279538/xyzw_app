@@ -13,6 +13,7 @@ import 'package:webview_flutter_wkwebview/webview_flutter_wkwebview.dart';
 import '../core/app_log.dart';
 import '../core/game_prefs_store.dart';
 import '../core/inject_scripts.dart';
+import '../core/ios_bg_keep.dart';
 import '../core/local_http_server.dart';
 import '../core/renderer_status.dart';
 import '../core/script_cache.dart';
@@ -236,12 +237,16 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
         state == AppLifecycleState.hidden ||
         state == AppLifecycleState.inactive) {
       _backgroundedAt ??= DateTime.now();
-      // 已关游戏时由 HomePage 卸载整页；此处同步清会话，避免竞态复用死 WebView
-      if ((state == AppLifecycleState.paused ||
-              state == AppLifecycleState.hidden) &&
-          !widget.visible &&
-          _sessions.isNotEmpty) {
-        _discardAllSessionsSync('background_while_minimized');
+      if (state == AppLifecycleState.paused ||
+          state == AppLifecycleState.hidden) {
+        if (widget.visible && _sessions.isNotEmpty) {
+          // 游戏内切后台：申请短时后台，尽量不断线
+          unawaited(IosBgKeep.begin());
+        } else if (!widget.visible && _sessions.isNotEmpty) {
+          // 已关游戏：清会话，避免 Offstage 死 WebView；整页由 Home 卸载
+          unawaited(IosBgKeep.end());
+          _discardAllSessionsSync('background_while_minimized');
+        }
       }
       return;
     }
@@ -255,12 +260,53 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
         'gameVisible': widget.visible,
         'sessions': _sessions.length,
       });
-      if (sec >= 8 && !widget.visible) {
+      unawaited(IosBgKeep.end());
+      if (widget.visible && _sessions.isNotEmpty) {
+        // 回前台仍在游戏：保活 HTTP + 触发 onShow/重连，不拆 WebView
+        unawaited(_resumeInGameSessions(sec));
+      } else if (sec >= 8 && !widget.visible && _sessions.isNotEmpty) {
         _httpSuspect = true;
-        if (_sessions.isNotEmpty) {
-          _discardAllSessionsSync('resume_minimized_${sec}s');
+        _discardAllSessionsSync('resume_minimized_${sec}s');
+      }
+    }
+  }
+
+  Future<void> _resumeInGameSessions(int bgSec) async {
+    AppLog.i('lifecycle', '游戏内回前台 ${bgSec}s，恢复会话 ${_sessions.length}');
+    _httpSuspect = true;
+    // 只探活/重启本地 HTTP，不销毁 WebView（资源已在内存，远程 WS 靠 onShow 重连）
+    if (_server != null && !await _httpAlive()) {
+      AppLog.w('lifecycle', '游戏内回前台时本地 HTTP 已死，重建服务（不重载页）');
+      if (_ownsServer) {
+        try {
+          await _server?.stop();
+        } catch (_) {}
+      }
+      _server = null;
+      _baseUrl = null;
+      _ownsServer = false;
+      final existing = widget.httpServer;
+      if (existing != null) {
+        final url = await existing.start();
+        if (url != null) {
+          _server = existing;
+          _baseUrl = url;
         }
       }
+      if (_server == null) {
+        final server = LocalHttpServer(widget.rendererDir);
+        final url = await server.start();
+        if (url != null) {
+          _server = server;
+          _ownsServer = true;
+          _baseUrl = url;
+        }
+      }
+    } else {
+      _httpSuspect = false;
+    }
+    for (final id in _sessions.keys.toList(growable: false)) {
+      await _pingSession(id, 'foreground_resume');
     }
   }
 
@@ -303,7 +349,10 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
     final c = _sessions[id]?.controller;
     if (c == null) return;
     try {
-      await c.runJavaScript('''
+      if (reason == 'foreground_resume') {
+        await c.runJavaScript(InjectScripts.foregroundResume);
+      } else {
+        await c.runJavaScript('''
 (function(){
   try {
     if (window.cc && cc.game && typeof cc.game.resume === 'function') {
@@ -315,6 +364,7 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
   } catch (e) {}
 })();
 ''');
+      }
     } catch (e) {
       AppLog.w('keepalive', 'session=$id reason=$reason ping失败: $e');
       _staleSessionIds.add(id);
@@ -500,6 +550,7 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
               await controller.runJavaScript(
                 '${InjectScripts.vhFix}\n${InjectScripts.canvasGuard}\n'
                 '${InjectScripts.visibilityKeepAlive}\n'
+                '${InjectScripts.appLifecycleBridge}\n'
                 '${InjectScripts.clientAnomalyWatch}\n'
                 '${InjectScripts.pvpDiagWatch}\n'
                 '${InjectScripts.lateSdkReady}\nwindow.__xyzwRoleBridge=false;\n'
@@ -741,6 +792,7 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
     await controller.runJavaScript(
       '${InjectScripts.compat}\n${InjectScripts.xhrIntercept}\n'
       '${InjectScripts.visibilityKeepAlive}\n'
+      '${InjectScripts.appLifecycleBridge}\n'
       '${InjectScripts.clientAnomalyWatch}\n'
       '${InjectScripts.pvpDiagWatch}\n'
       '${InjectScripts.persistGamePrefs}\n'
