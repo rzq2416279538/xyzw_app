@@ -1,5 +1,5 @@
 name: xyzw_app
-description: 鱼壳 / xyzw_helper — Flutter 一期游戏壳（对齐 naiwa-release）
+description: 咸强之王 — 以 iOS 为首要目标的 Flutter 游戏壳
 publish_to: 'none'
 version: 1.0.0+1
 
@@ -12,6 +12,7 @@ dependencies:
   cupertino_icons: ^1.0.8
   webview_flutter: ^4.13.0
   webview_flutter_android: ^4.10.0
+  webview_flutter_wkwebview: ^3.23.0
   path_provider: ^2.1.5
   shared_preferences: ^2.5.3
   file_picker: ^10.1.2

@@ -65,9 +65,22 @@ class _HomePageState extends State<HomePage> {
   void _onStore() => setState(() {});
 
   Future<void> _init() async {
+    final sw = Stopwatch()..start();
     try {
+      AppLog.i('boot', '首页初始化开始 platform=${Platform.operatingSystem}');
       await widget.store.load();
+      AppLog.diag('boot', {
+        'event': 'accounts_loaded',
+        'count': widget.store.accounts.length,
+        'ms': sw.elapsedMilliseconds,
+      });
       await widget.scripts.load();
+      AppLog.diag('boot', {
+        'event': 'scripts_loaded',
+        'count': widget.scripts.scripts.length,
+        'enabled': widget.scripts.enabledScripts.length,
+        'ms': sw.elapsedMilliseconds,
+      });
       await RoleAvatarCache.ensureLoaded();
       final dir = await RendererCache.ensure();
       final override = Directory(
@@ -77,8 +90,20 @@ class _HomePageState extends State<HomePage> {
         await RendererCache.mergeFromExternal(override, dir);
       }
       final status = await RendererStatus.inspect(dir);
+      AppLog.diag('boot', {
+        'event': 'renderer',
+        'ready': status.isReady,
+        'dir': dir.path,
+        'ms': sw.elapsedMilliseconds,
+      });
       final http = LocalHttpServer(dir);
       await http.start();
+      AppLog.diag('boot', {
+        'event': 'http_ready',
+        'baseUrl': http.baseUrl,
+        'port': http.port,
+        'ms': sw.elapsedMilliseconds,
+      });
       if (!mounted) {
         await http.stop();
         return;
@@ -89,11 +114,13 @@ class _HomePageState extends State<HomePage> {
         _status = status;
         _booting = false;
       });
-      // 首页空闲时预拉引擎关键资源，暖缓存，减轻每次进游戏的滚动加载。
       final base = http.baseUrl;
       // ignore: unawaited_futures
-      RendererWarmup.prefetch(base, dir);
-    } catch (e) {
+      RendererWarmup.prefetch(base, dir).then((_) {
+        AppLog.i('boot', '资源预热完成 ${sw.elapsedMilliseconds}ms');
+      });
+    } catch (e, st) {
+      AppLog.e('boot', '首页初始化失败 $e\n$st');
       if (!mounted) return;
       setState(() {
         _bootError = e.toString();
@@ -106,7 +133,23 @@ class _HomePageState extends State<HomePage> {
     try {
       final msg = await AppLog.exportFile();
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+      if (Platform.isIOS) {
+        await showCupertinoDialog<void>(
+          context: context,
+          builder: (ctx) => CupertinoAlertDialog(
+            title: const Text('日志已导出'),
+            content: Text(msg),
+            actions: [
+              CupertinoDialogAction(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('好'),
+              ),
+            ],
+          ),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+      }
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -133,6 +176,13 @@ class _HomePageState extends State<HomePage> {
     final dir = _rendererDir;
     final status = _status;
     if (account == null || dir == null || status == null) return;
+    AppLog.diag('ui', {
+      'event': 'start_game',
+      'accountId': accountId,
+      'label': account.fileLabel,
+      'gameMounted': _gameMounted,
+      'running': _running.contains(accountId),
+    });
     if (!status.isReady) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('游戏资源未就绪，无法进入')),

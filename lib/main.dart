@@ -13,6 +13,9 @@ Future<void> main() async {
     AppLog.e('flutter', '${details.exceptionAsString()}\n${details.stack}');
     FlutterError.presentError(details);
   };
+
+  await AppLog.ensureBootHeader(appVersion: '1.0.0+1');
+
   SystemChrome.setSystemUIOverlayStyle(
     const SystemUiOverlayStyle(
       statusBarColor: Colors.transparent,
@@ -37,7 +40,31 @@ class YukeApp extends StatelessWidget {
       title: '咸强之王',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.light(),
+      builder: (context, child) {
+        return ScrollConfiguration(
+          behavior: const _IosScrollBehavior(),
+          child: child ?? const SizedBox.shrink(),
+        );
+      },
       home: HomePage(store: store, scripts: scripts),
     );
+  }
+}
+
+class _IosScrollBehavior extends ScrollBehavior {
+  const _IosScrollBehavior();
+
+  @override
+  ScrollPhysics getScrollPhysics(BuildContext context) {
+    return const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics());
+  }
+
+  @override
+  Widget buildOverscrollIndicator(
+    BuildContext context,
+    Widget child,
+    ScrollableDetails details,
+  ) {
+    return child;
   }
 }

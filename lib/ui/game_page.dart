@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
+import 'package:webview_flutter_wkwebview/webview_flutter_wkwebview.dart';
 
 import '../core/app_log.dart';
 import '../core/inject_scripts.dart';
@@ -210,8 +211,17 @@ class GamePageState extends State<GamePage> {
     _bootingIds.add(accountId);
     if (mounted) setState(() => _activeId = accountId);
 
+    final sw = Stopwatch()..start();
     try {
-      final controller = WebViewController();
+      AppLog.diag('game', {
+        'event': 'session_start',
+        'accountId': accountId,
+        'label': account.fileLabel,
+        'baseUrl': _baseUrl,
+        'platform': Platform.isIOS ? 'ios' : Platform.operatingSystem,
+      });
+
+      final controller = await _createController();
       await controller.setJavaScriptMode(JavaScriptMode.unrestricted);
       await controller.setBackgroundColor(const Color(0xFFF2F2F7));
 
@@ -226,6 +236,10 @@ class GamePageState extends State<GamePage> {
           },
           onHideCustomWidget: () {},
         );
+      } else if (controller.platform is WebKitWebViewController) {
+        final ios = controller.platform as WebKitWebViewController;
+        await ios.setAllowsBackForwardNavigationGestures(false);
+        await ios.setInspectable(kDebugMode);
       }
 
       await controller.addJavaScriptChannel(
@@ -234,16 +248,35 @@ class GamePageState extends State<GamePage> {
       );
       await controller.setOnConsoleMessage((m) {
         final text = m.message;
-        if (text.contains('咸强之王') ||
-            m.level == JavaScriptLogLevel.error) {
+        final important = text.contains('咸强之王') ||
+            text.contains('BIN') ||
+            text.contains('拦截') ||
+            text.contains('login') ||
+            m.level == JavaScriptLogLevel.error ||
+            m.level == JavaScriptLogLevel.warning;
+        if (important) {
           AppLog.js('${m.level.name}: $text');
         }
       });
 
       await controller.setNavigationDelegate(
         NavigationDelegate(
-          onPageStarted: (_) => _injectEarly(controller, account),
-          onPageFinished: (_) async {
+          onPageStarted: (url) {
+            AppLog.diag('game', {
+              'event': 'page_started',
+              'accountId': accountId,
+              'url': url,
+              'ms': sw.elapsedMilliseconds,
+            });
+            _injectEarly(controller, account);
+          },
+          onPageFinished: (url) async {
+            AppLog.diag('game', {
+              'event': 'page_finished',
+              'accountId': accountId,
+              'url': url,
+              'ms': sw.elapsedMilliseconds,
+            });
             AppLog.i('game', 'HTTP加载完成: $_baseUrl ($accountId)');
             try {
               await controller.runJavaScript(
@@ -251,14 +284,37 @@ class GamePageState extends State<GamePage> {
                 '${InjectScripts.lateSdkReady}\nwindow.__xyzwRoleBridge=false;\n'
                 '${InjectScripts.roleBridge}\n${InjectScripts.gameReadyWatch}',
               );
+              await _probeBinState(controller, accountId, 'page_finished');
             } catch (e) {
               AppLog.e('game', '晚注入失败: $e');
               _markReady(accountId);
             }
           },
           onWebResourceError: (err) {
-            if (err.isForMainFrame ?? false) {
-              AppLog.e('game', '页面加载失败: ${err.description}');
+            final url = err.url ?? '';
+            final interesting = (err.isForMainFrame ?? false) ||
+                url.contains('__xyzw/bin') ||
+                url.contains('login') ||
+                url.contains('hortorgames');
+            if (interesting) {
+              AppLog.diag('game', {
+                'event': 'resource_error',
+                'mainFrame': err.isForMainFrame,
+                'code': err.errorCode,
+                'type': err.errorType?.name,
+                'desc': err.description,
+                'url': url,
+              });
+            }
+          },
+          onHttpError: (err) {
+            final uri = err.request?.uri.toString() ?? '';
+            if (uri.contains('__xyzw/bin') || uri.contains('login')) {
+              AppLog.diag('game', {
+                'event': 'http_error',
+                'status': err.response?.statusCode,
+                'url': uri,
+              });
             }
           },
         ),
@@ -271,13 +327,19 @@ class GamePageState extends State<GamePage> {
       if (!_scriptsReady) await _publishScripts();
       _armReadyWatch(accountId);
       final target = Uri.parse(_gameUrl(_baseUrl!));
+      AppLog.diag('game', {
+        'event': 'load_request',
+        'url': target.toString(),
+        'ms': sw.elapsedMilliseconds,
+      });
       await controller.loadRequest(target);
       unawaited(widget.store.touchLastUsed(accountId));
 
       if (!mounted) return;
       setState(() {});
       _emitRunning();
-    } catch (e) {
+    } catch (e, st) {
+      AppLog.e('game', 'session失败 $accountId: $e\n$st');
       final s = _sessions[accountId];
       if (s != null) {
         s.loading = false;
@@ -288,6 +350,50 @@ class GamePageState extends State<GamePage> {
       if (mounted) setState(() {});
     } finally {
       _bootingIds.remove(accountId);
+      AppLog.diag('game', {
+        'event': 'session_boot_done',
+        'accountId': accountId,
+        'ms': sw.elapsedMilliseconds,
+      });
+    }
+  }
+
+  Future<WebViewController> _createController() async {
+    if (WebViewPlatform.instance is WebKitWebViewPlatform) {
+      final params = WebKitWebViewControllerCreationParams(
+        allowsInlineMediaPlayback: true,
+        mediaTypesRequiringUserAction: const <PlaybackMediaTypes>{},
+      );
+      return WebViewController.fromPlatformCreationParams(params);
+    }
+    return WebViewController();
+  }
+
+  Future<void> _probeBinState(
+    WebViewController controller,
+    String accountId,
+    String phase,
+  ) async {
+    try {
+      final raw = await controller.runJavaScriptReturningResult(r'''
+(function(){
+  var buf = window.__activeBinBuf;
+  return JSON.stringify({
+    hasBuf: !!buf,
+    bytes: buf && buf.byteLength || 0,
+    url: window.__xyzwBinUrl || '',
+    xhr: !!window.__xhrIntercepted
+  });
+})()
+''');
+      AppLog.diag('game', {
+        'event': 'bin_probe',
+        'phase': phase,
+        'accountId': accountId,
+        'result': raw.toString(),
+      });
+    } catch (e) {
+      AppLog.w('game', 'bin_probe失败 phase=$phase $e');
     }
   }
 
@@ -369,6 +475,7 @@ class GamePageState extends State<GamePage> {
       '${InjectScripts.activateBinUrl(binUrl, account.fileLabel)}\n'
       '${InjectScripts.gameReadyWatch}',
     );
+    await _probeBinState(controller, account.id, 'inject_early');
     if (kDebugMode) {
       await controller.runJavaScript(InjectScripts.hsdkProbe);
     }
@@ -400,8 +507,20 @@ class GamePageState extends State<GamePage> {
         return;
       }
       if (type == 'role') {
-        // 已进号说明过了黑屏加载，可收起壳层
-        _markReady(accountId);
+        final rid = (map['roleId'] as num?)?.toInt() ?? 0;
+        final name = (map['name'] as String?)?.trim() ?? '';
+        AppLog.diag('game', {
+          'event': 'role_bridge',
+          'accountId': accountId,
+          'roleId': rid,
+          'name': name,
+          'from': map['from'],
+        });
+        if (rid > 0) {
+          _markReady(accountId);
+        } else {
+          AppLog.w('game', 'ROLE为空(roleId=0)，可能登录失败，请查BIN拦截日志');
+        }
       }
       if (type != 'role') return;
 
@@ -752,17 +871,19 @@ class GamePageState extends State<GamePage> {
     }
     final booting =
         session.loading || _bootingIds.contains(session.accountId);
-    // 加载中把 WebView 缩到 1px，避免 Hybrid Composition 黑底盖过 Flutter 加载层
+    // iOS WKWebView：全尺寸加载 + 上层遮罩（勿缩到 1px，会影响布局/触摸）
+    // Android Hybrid Composition：加载期缩到 1px，避免黑底盖住 Flutter 层
+    final shrink = booting && !Platform.isIOS;
     return Stack(
       fit: StackFit.expand,
       children: [
         Positioned(
           left: 0,
           top: 0,
-          width: booting ? 1 : null,
-          height: booting ? 1 : null,
-          right: booting ? null : 0,
-          bottom: booting ? null : 0,
+          width: shrink ? 1 : null,
+          height: shrink ? 1 : null,
+          right: shrink ? null : 0,
+          bottom: shrink ? null : 0,
           child: RepaintBoundary(child: _buildWebView(session.controller)),
         ),
         if (booting)
