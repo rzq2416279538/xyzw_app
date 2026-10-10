@@ -36,6 +36,7 @@ class GamePage extends StatefulWidget {
     required this.status,
     required this.onBack,
     required this.visible,
+    required this.userClosed,
     this.onRunningChanged,
     this.httpServer,
   });
@@ -48,6 +49,8 @@ class GamePage extends StatefulWidget {
   final VoidCallback onBack;
   /// 是否盖在前台（false=已关游戏回首页，WebView 仍 Offstage 保活）
   final bool visible;
+  /// 用户点了顶栏返回（不是系统手势误关）
+  final bool userClosed;
   final ValueChanged<Set<String>>? onRunningChanged;
   final LocalHttpServer? httpServer;
 
@@ -239,19 +242,20 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
         state == AppLifecycleState.paused ||
         state == AppLifecycleState.hidden) {
       _backgroundedAt ??= DateTime.now();
-      // inactive 时就记下「在玩」，避免随后 visible 被误改
+      // 有会话且用户没点返回 = 仍在玩（忽略 visible 被系统手势误改）
       if (!_playingWhenBackgrounded &&
-          widget.visible &&
-          _sessions.isNotEmpty) {
+          _sessions.isNotEmpty &&
+          !widget.userClosed) {
         _playingWhenBackgrounded = true;
       }
       if (state == AppLifecycleState.paused ||
           state == AppLifecycleState.hidden) {
-        if (_playingWhenBackgrounded) {
-          // 游戏内切后台：保活，绝不丢会话
+        if (_playingWhenBackgrounded ||
+            (_sessions.isNotEmpty && !widget.userClosed)) {
+          _playingWhenBackgrounded = true;
           unawaited(IosBgKeep.begin());
-        } else if (!widget.visible && _sessions.isNotEmpty) {
-          // 用户已明确关游戏后再进后台：清会话，整页由 Home 卸载
+        } else if (widget.userClosed && _sessions.isNotEmpty) {
+          // 用户点返回关游戏后再进后台：清会话，整页由 Home 卸载
           unawaited(IosBgKeep.end());
           _discardAllSessionsSync('background_while_minimized');
         }

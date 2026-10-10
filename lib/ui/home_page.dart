@@ -49,9 +49,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final _running = <String>{};
   Account? _menuAccount;
   DateTime? _backgroundedAt;
-  /// 进入后台那一刻游戏是否盖在前台；用于避免误卸「正在玩」的 GamePage
-  var _gameVisibleWhenBackgrounded = false;
+  /// 进入后台那一刻是否仍在玩（有会话且用户未点返回）
+  var _playingWhenBackgrounded = false;
   var _enteredBackground = false;
+  /// 仅顶栏「返回」置 true；系统手势/切后台不得当作关游戏
+  var _userClosedGame = false;
 
   @override
   void initState() {
@@ -74,11 +76,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     // paused/hidden：真正进后台。inactive 会在控制中心等场景误触发，不能拆页。
     if (state == AppLifecycleState.inactive) {
-      // 尽早记下「还在游戏里」，防止随后误 minimize 导致卸页
       _backgroundedAt ??= DateTime.now();
       if (!_enteredBackground) {
         _enteredBackground = true;
-        _gameVisibleWhenBackgrounded = _gameVisible;
+        // 日志铁证：切后台时 gameVisible 曾被误改成 false，但仍有 sessions。
+        // 只认「用户点过返回」才算关游戏。
+        _playingWhenBackgrounded = _gameMounted && !_userClosedGame;
       }
       return;
     }
@@ -87,19 +90,29 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _backgroundedAt ??= DateTime.now();
       if (!_enteredBackground) {
         _enteredBackground = true;
-        _gameVisibleWhenBackgrounded = _gameVisible;
+        _playingWhenBackgrounded = _gameMounted && !_userClosedGame;
       }
       AppLog.diag('lifecycle', {
         'event': 'home_background',
         'state': state.name,
         'gameVisible': _gameVisible,
-        'visibleAtBg': _gameVisibleWhenBackgrounded,
+        'userClosed': _userClosedGame,
+        'playingAtBg': _playingWhenBackgrounded,
         'gameMounted': _gameMounted,
+        'running': _running.length,
       });
-      // 仅「先关游戏回首页，再进系统后台」才卸页。
-      // 游戏内切后台必须保留 GamePage，否则回来又要重新点进入。
-      if (!_gameVisibleWhenBackgrounded && _gameMounted) {
-        AppLog.w('lifecycle', '后台且游戏已关闭，卸载 GamePage（防白屏）');
+      if (_playingWhenBackgrounded && _gameMounted && !_gameVisible) {
+        // 被误藏起：立刻拉回游戏层，绝不能卸页
+        AppLog.w('lifecycle', '后台时纠正误隐藏，保持游戏');
+        setState(() {
+          _gameVisible = true;
+          _userClosedGame = false;
+        });
+      } else if (!_playingWhenBackgrounded &&
+          _userClosedGame &&
+          _gameMounted) {
+        // 用户点返回关游戏后再进后台：卸页防白屏
+        AppLog.w('lifecycle', '后台且用户已关游戏，卸载 GamePage');
         setState(() {
           _gameMounted = false;
           _gameInitialId = null;
@@ -111,8 +124,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (state == AppLifecycleState.resumed) {
       final bg = _backgroundedAt;
       _backgroundedAt = null;
-      final wasPlaying = _gameVisibleWhenBackgrounded;
-      _gameVisibleWhenBackgrounded = false;
+      final wasPlaying = _playingWhenBackgrounded;
+      _playingWhenBackgrounded = false;
       _enteredBackground = false;
       final sec = bg == null ? 0 : DateTime.now().difference(bg).inSeconds;
       AppLog.diag('lifecycle', {
@@ -120,14 +133,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         'sec': sec,
         'gameVisible': _gameVisible,
         'wasPlaying': wasPlaying,
+        'userClosed': _userClosedGame,
         'gameMounted': _gameMounted,
       });
-      // 若后台前在玩、却被误藏起，拉回游戏层
       if (wasPlaying && _gameMounted && !_gameVisible) {
-        AppLog.w('lifecycle', '纠正误隐藏：恢复游戏层');
-        setState(() => _gameVisible = true);
+        AppLog.w('lifecycle', '回前台纠正误隐藏：恢复游戏层');
+        setState(() {
+          _gameVisible = true;
+          _userClosedGame = false;
+        });
       }
-      // 关游戏进过后台：回前台先把本地 HTTP 拉活；游戏内也探活但不卸页
       if (!wasPlaying || sec >= 8) {
         unawaited(_ensureHttpAlive());
       }
@@ -291,14 +306,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   void _minimizeGame() {
-    if (!_gameVisible) return;
-    // 切后台时 lifecycle 会先变 inactive/hidden；此时不能当成用户点返回
-    final life = WidgetsBinding.instance.lifecycleState;
-    if (life != AppLifecycleState.resumed) {
-      AppLog.w('lifecycle', '忽略非前台 minimize (state=${life?.name})');
-      return;
-    }
-    setState(() => _gameVisible = false);
+    // 只应由游戏顶栏返回调用；标记为用户主动关游戏
+    AppLog.i('lifecycle', '用户关闭游戏（顶栏返回）');
+    setState(() {
+      _gameVisible = false;
+      _userClosedGame = true;
+    });
   }
 
   Future<void> _startGame(String accountId) async {
@@ -330,12 +343,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       setState(() {
         _gameMounted = true;
         _gameVisible = true;
+        _userClosedGame = false;
         _gameInitialId = accountId;
       });
       return;
     }
     // 先显示游戏层再 open
-    setState(() => _gameVisible = true);
+    setState(() {
+      _gameVisible = true;
+      _userClosedGame = false;
+    });
     await Future<void>.delayed(Duration.zero);
     await _gameKey.currentState?.openAccount(accountId);
   }
@@ -596,6 +613,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 status: status,
                 httpServer: _http,
                 visible: _gameVisible,
+                userClosed: _userClosedGame,
                 onBack: _minimizeGame,
                 onRunningChanged: (ids) {
                   if (!mounted) return;
@@ -603,8 +621,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     _running
                       ..clear()
                       ..addAll(ids);
-                    // 注意：会话清空不能自动藏游戏层。
-                    // 否则后台清理/重建竞态会把「正在玩」踢回首页，表现为又要重新进游戏。
                   });
                 },
               ),
@@ -613,6 +629,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         : const SizedBox.shrink();
 
     return PopScope(
+      // 游戏中禁止系统返回/侧滑关游戏（日志：切后台会误触发并卸页）
       canPop: !_gameVisible && _menuAccount == null,
       onPopInvokedWithResult: (didPop, result) {
         if (didPop) return;
@@ -620,13 +637,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           _closeAccountMenu();
           return;
         }
-        // 切后台时 iOS 偶发触发 pop；仅在 resumed 时当成用户返回
-        final life = WidgetsBinding.instance.lifecycleState;
-        if (life != AppLifecycleState.resumed) {
-          AppLog.w('lifecycle', '忽略非前台 pop (state=${life?.name})');
-          return;
-        }
-        _minimizeGame();
+        // 故意不调用 _minimizeGame：关游戏只认顶栏返回按钮
+        AppLog.w('lifecycle', '忽略系统 pop，请用游戏内返回关闭');
       },
       child: Stack(
         fit: StackFit.expand,
