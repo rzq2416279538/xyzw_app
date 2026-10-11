@@ -275,16 +275,22 @@ class InjectScripts {
 })();
 ''';
 
-  /// 盐场/蟠桃「客户端数据异常」修复：
-  /// 游戏 CHECK_PVP_BATTLE_VERSION 在 RejectLowVersionPvP=on 且
-  /// ConsoleManager.isLowerVersion 时弹 C_Battle_Tips_1。
-  /// isLowerVersion 来自 checkGameVer：非 (IsLastVersion|isDev|isH5|isAudit)。
-  /// iOS 壳常被当成 isNative，用 CODE_VERSION===remote.codeVersion；
-  /// 本地 game-defines 过旧时 IsLastVersion=false → 误拒。
+  /// 盐场/蟠桃「客户端数据异常」修复 + 强化快照日志。
+  /// 真机若仍失败，导出日志搜：PVP_SNAP / PVP_VER / CHECK_PVP / C_Battle_Tips
   static const pvpVersionGuard = r'''
 (function(){
   if (window.__xyzwPvpVerGuard) return;
   window.__xyzwPvpVerGuard = true;
+  var _patchFlags = {
+    hsdkCheckSwitches: false,
+    consoleCheckGameVer: false,
+    consoleIsLowerProp: false,
+    checkPvpBattle: false,
+    isH5: false,
+    codeSynced: false
+  };
+  var _lastSnapJson = '';
+  var _checkPvpHits = 0;
   function post(obj){
     try {
       if (window.XyzwBridge && window.XyzwBridge.postMessage) {
@@ -299,17 +305,133 @@ class InjectScripts {
       post({ type: 'pvpDiag', level: 'I', message: 'PVP_VER ' + args.map(String).join(' ') });
     } catch (e) {}
   }
+  function warn(){
+    try {
+      var args = Array.prototype.slice.call(arguments);
+      console.warn.apply(console, ['[咸强之王][PVP_VER]'].concat(args));
+      post({ type: 'pvpDiag', level: 'W', message: 'PVP_VER ' + args.map(String).join(' ') });
+    } catch (e) {}
+  }
+  function tryRequire(name){
+    try {
+      if (typeof window.__require === 'function') return window.__require(name);
+    } catch (e) {}
+    return null;
+  }
+  function readPlatform(){
+    var out = { ok: false };
+    try {
+      var PM = tryRequire('PlatformManager');
+      var inst = PM && (PM.PlatformManager && PM.PlatformManager.instance || PM.instance);
+      if (!inst) return out;
+      out.ok = true;
+      try { out.isH5 = !!inst.isH5; } catch (e0) { out.isH5 = 'err'; }
+      try { out.isNative = !!inst.isNative; } catch (e1) { out.isNative = 'err'; }
+      try { out.isDev = !!inst.isDev; } catch (e2) { out.isDev = 'err'; }
+      try { out.isWechatFamiliy = !!inst.isWechatFamiliy; } catch (e3) {}
+      try {
+        if (typeof inst.CHECK_SWITCH === 'function') {
+          // 枚举值未知时尝试常见写法；失败不抛
+          out.checkSwitchFn = true;
+        }
+      } catch (e4) {}
+    } catch (e) {}
+    return out;
+  }
+  function readConsole(){
+    var out = { ok: false };
+    try {
+      var CM = tryRequire('ConsoleManager');
+      var inst = CM && (CM.ConsoleManager && CM.ConsoleManager.instance || CM.instance);
+      if (!inst) return out;
+      out.ok = true;
+      try { out.isLowerVersion = !!inst.isLowerVersion; } catch (e0) { out.isLowerVersion = 'err'; }
+      try { out._isLowerVersion = !!inst._isLowerVersion; } catch (e1) {}
+      out.checkGameVerPatched = !!(inst.checkGameVer && inst.checkGameVer.__xyzwPatched);
+    } catch (e) {}
+    return out;
+  }
+  function readBattle(){
+    var out = { ok: false };
+    try {
+      var BU = tryRequire('BattleUIManager');
+      if (!BU) return out;
+      out.ok = true;
+      out.hasCheck = typeof BU.CHECK_PVP_BATTLE_VERSION === 'function';
+      out.checkPatched = !!(BU.CHECK_PVP_BATTLE_VERSION && BU.CHECK_PVP_BATTLE_VERSION.__xyzwPatched);
+      try {
+        if (typeof BU.GET_BATTLE_VERSION === 'function') out.battleVerFn = String(BU.GET_BATTLE_VERSION());
+      } catch (e0) {}
+    } catch (e) {}
+    return out;
+  }
+  function readRole(){
+    var out = {};
+    try {
+      var SD = tryRequire('ServerData');
+      var R = SD && SD.ROLE;
+      if (R) {
+        out.roleId = R.roleId || R.id || 0;
+        out.serverId = R.serverId || R.realServerId || 0;
+        out.roleName = R.name || '';
+      }
+    } catch (e) {}
+    return out;
+  }
+  function snapshot(reason){
+    var snap = {
+      reason: reason || '',
+      ts: Date.now(),
+      localCODE_VERSION: (typeof CODE_VERSION !== 'undefined' ? String(CODE_VERSION) : ''),
+      windowCODE_VERSION: (window.CODE_VERSION != null ? String(window.CODE_VERSION) : ''),
+      gameVersion: (typeof GAME_VERSION !== 'undefined' ? String(GAME_VERSION) : ''),
+      remoteCodeVersion: '',
+      remoteCommit: '',
+      manifestIsLast: window.__xyzwManifestIsLast,
+      manifestBattleVersion: window.__xyzwManifestBattleVersion,
+      switchReject: (window.__switchStore && window.__switchStore.RejectLowVersionPvP),
+      patches: _patchFlags,
+      checkPvpHits: _checkPvpHits,
+      platform: readPlatform(),
+      consoleMgr: readConsole(),
+      battle: readBattle(),
+      role: readRole()
+    };
+    try {
+      var bv = window._CCSettings && window._CCSettings.bundleVers;
+      if (bv) {
+        snap.remoteCodeVersion = bv.codeVersion || '';
+        snap.remoteCommit = bv.COMMIT_ID || '';
+      }
+    } catch (e0) {}
+    snap.codeMatch = !!(snap.remoteCodeVersion && snap.localCODE_VERSION &&
+      snap.remoteCodeVersion === snap.localCODE_VERSION);
+    snap.risk_lower = !!(snap.consoleMgr && snap.consoleMgr.isLowerVersion);
+    snap.risk_rejectOn = (snap.switchReject === 1 || snap.switchReject === true || snap.switchReject === '1');
+    var json = '';
+    try { json = JSON.stringify(snap); } catch (e1) { json = String(snap); }
+    // 相同内容不刷屏；reason 含 force/check/tip 时必打
+    var force = /force|check|tip|anomaly|warn/i.test(String(reason || ''));
+    if (!force && json === _lastSnapJson) return snap;
+    _lastSnapJson = json;
+    console.log('[咸强之王][PVP_SNAP]', reason, json);
+    post({ type: 'pvpSnapshot', reason: String(reason || ''), snap: snap });
+    if (snap.risk_lower || snap.risk_rejectOn || !snap.codeMatch) {
+      warn('风险位', 'isLower='+snap.risk_lower, 'rejectOn='+snap.risk_rejectOn, 'codeMatch='+snap.codeMatch,
+        'local='+snap.localCODE_VERSION, 'remote='+snap.remoteCodeVersion);
+    }
+    return snap;
+  }
+  // 暴露给异常侦测：弹窗时附带快照
+  window.__xyzwPvpSnapshot = function(reason){ return snapshot(reason || 'external'); };
   function forceRejectOff(){
     try {
       if (!window.__switchStore || typeof window.__switchStore !== 'object') {
         window.__switchStore = {};
       }
-      if (window.__switchStore.RejectLowVersionPvP) {
-        window.__switchStore.RejectLowVersionPvP = 0;
-        log('force RejectLowVersionPvP=0');
-      } else {
-        window.__switchStore.RejectLowVersionPvP = 0;
-      }
+      var prev = window.__switchStore.RejectLowVersionPvP;
+      window.__switchStore.RejectLowVersionPvP = 0;
+      if (prev) log('force RejectLowVersionPvP', prev, '→ 0');
     } catch (e) {}
     try {
       var h = window.HSDK;
@@ -330,6 +452,7 @@ class InjectScripts {
         };
         wrapped.__xyzwPvpPatched = true;
         h.checkSwitches = wrapped;
+        _patchFlags.hsdkCheckSwitches = true;
         log('patched HSDK.checkSwitches');
       }
     } catch (e3) {}
@@ -346,15 +469,12 @@ class InjectScripts {
         }
         try { window.CODE_VERSION = remote; } catch (e1) {}
         try { if (typeof globalThis !== 'undefined') globalThis.CODE_VERSION = remote; } catch (e2) {}
-        log('sync CODE_VERSION', remote);
+        if (!_patchFlags.codeSynced) {
+          _patchFlags.codeSynced = true;
+          log('sync CODE_VERSION', remote);
+        }
       }
     } catch (e) {}
-  }
-  function tryRequire(name){
-    try {
-      if (typeof window.__require === 'function') return window.__require(name);
-    } catch (e) {}
-    return null;
   }
   function markLastVersion(){
     var ok = false;
@@ -366,13 +486,14 @@ class InjectScripts {
         if (typeof inst.checkGameVer === 'function' && !inst.checkGameVer.__xyzwPatched) {
           var old = inst.checkGameVer.bind(inst);
           var wrapped = function(){
-            // 始终视为最新版，避免盐场弹 C_Battle_Tips_1
             inst._isLowerVersion = false;
             try { old(); } catch (e5) {}
             inst._isLowerVersion = false;
+            snapshot('after_checkGameVer');
           };
           wrapped.__xyzwPatched = true;
           inst.checkGameVer = wrapped;
+          _patchFlags.consoleCheckGameVer = true;
           log('patched ConsoleManager.checkGameVer');
         }
         try {
@@ -382,6 +503,7 @@ class InjectScripts {
             get: function(){ return false; },
             set: function(){}
           });
+          _patchFlags.consoleIsLowerProp = true;
         } catch (eProp) {}
         ok = true;
       }
@@ -389,10 +511,26 @@ class InjectScripts {
     try {
       var BU = tryRequire('BattleUIManager');
       if (BU && typeof BU.CHECK_PVP_BATTLE_VERSION === 'function' && !BU.CHECK_PVP_BATTLE_VERSION.__xyzwPatched) {
-        var always = function(){ return true; };
-        always.__xyzwPatched = true;
-        BU.CHECK_PVP_BATTLE_VERSION = always;
-        log('patched CHECK_PVP_BATTLE_VERSION → always true');
+        var wrappedCheck = function(battleType, showTip){
+          _checkPvpHits++;
+          var snap = snapshot('CHECK_PVP type='+battleType+' showTip='+showTip);
+          // 不调用原函数，避免 SHOW_TIP；始终放行并记日志
+          log('CHECK_PVP_BATTLE_VERSION bypass', 'type='+battleType, 'showTip='+showTip,
+            'hits='+_checkPvpHits, 'isLower='+(snap.consoleMgr && snap.consoleMgr.isLowerVersion),
+            'reject='+snap.switchReject);
+          post({
+            type: 'pvpDiag',
+            level: 'W',
+            event: 'CHECK_PVP',
+            message: 'bypass type='+battleType+' showTip='+showTip+' hits='+_checkPvpHits,
+            summary: snap
+          });
+          return true;
+        };
+        wrappedCheck.__xyzwPatched = true;
+        BU.CHECK_PVP_BATTLE_VERSION = wrappedCheck;
+        _patchFlags.checkPvpBattle = true;
+        log('patched CHECK_PVP_BATTLE_VERSION → log+bypass');
         ok = true;
       }
     } catch (e7) {}
@@ -400,10 +538,7 @@ class InjectScripts {
   }
   function softIsH5(){
     try {
-      var req = window.__require;
-      if (typeof req !== 'function') return;
-      var PM = null;
-      try { PM = req('PlatformManager'); } catch (e0) {}
+      var PM = tryRequire('PlatformManager');
       var inst = PM && (PM.PlatformManager && PM.PlatformManager.instance || PM.instance);
       if (!inst) return;
       try {
@@ -413,22 +548,51 @@ class InjectScripts {
           get: function(){ return true; },
           set: function(){}
         });
-        log('PlatformManager.isH5 forced true');
+        if (!_patchFlags.isH5) {
+          _patchFlags.isH5 = true;
+          log('PlatformManager.isH5 forced true');
+        }
       } catch (e1) {
-        try { inst.isH5 = true; log('PlatformManager.isH5 assigned true'); } catch (e2) {}
+        try {
+          inst.isH5 = true;
+          if (!_patchFlags.isH5) { _patchFlags.isH5 = true; log('PlatformManager.isH5 assigned true'); }
+        } catch (e2) {}
       }
     } catch (e) {}
   }
+  // 监听游戏自己打的开关/版本日志，立刻出快照
+  try {
+    var _w = console.warn;
+    if (typeof _w === 'function' && !_w.__xyzwPvpWarnHook) {
+      var hw = function(){
+        try {
+          var text = Array.prototype.slice.call(arguments).map(String).join(' ');
+          if (/RejectLowVersionPvP|isLast,\s*codeVersion|BATTLE_VERSION|GameVersionMisMatch|RemoteCodeMisMatch|CODE_GameVer_Lower|C_Battle_Tips/i.test(text)) {
+            snapshot('warn:'+text.slice(0,120));
+          }
+        } catch (e0) {}
+        return _w.apply(console, arguments);
+      };
+      hw.__xyzwPvpWarnHook = true;
+      console.warn = hw;
+    }
+  } catch (eW) {}
   function tick(n){
     forceRejectOff();
     syncCodeVersion();
     softIsH5();
     markLastVersion();
-    if (n < 40) setTimeout(function(){ tick(n + 1); }, n < 10 ? 300 : 1000);
+    if (n === 0 || n === 5 || n === 15 || n === 30 || n % 20 === 0) {
+      snapshot('tick_'+n);
+    }
+    if (n < 120) setTimeout(function(){ tick(n + 1); }, n < 20 ? 500 : 2000);
   }
   forceRejectOff();
+  snapshot('boot');
   setTimeout(function(){ tick(0); }, 0);
-  console.log('[咸强之王][PVP_VER] 盐场版本守卫已启动');
+  // 进盐场前用户可能停留较久：每 3 分钟补一张
+  setInterval(function(){ snapshot('heartbeat_3m'); }, 180000);
+  console.log('[咸强之王][PVP_VER] 盐场版本守卫+快照已启动 搜PVP_SNAP');
 })();
 ''';
 
@@ -497,6 +661,15 @@ class InjectScripts {
           }
         }
       } catch (e3) {}
+      // 盐场关键字段：失败时对照 PVP_SNAP
+      try {
+        out.CODE_VERSION = (typeof CODE_VERSION !== 'undefined' ? String(CODE_VERSION) : '');
+        out.remoteCodeVersion = (window._CCSettings && window._CCSettings.bundleVers && window._CCSettings.bundleVers.codeVersion) || '';
+        out.manifestIsLast = window.__xyzwManifestIsLast;
+        out.manifestBattleVersion = window.__xyzwManifestBattleVersion;
+        out.switchReject = window.__switchStore && window.__switchStore.RejectLowVersionPvP;
+        out.codeMatch = !!(out.CODE_VERSION && out.remoteCodeVersion && out.CODE_VERSION === out.remoteCodeVersion);
+      } catch (e4) {}
       out.ts = Date.now();
     } catch (e) {
       out.err = String(e && e.message || e);
@@ -513,21 +686,31 @@ class InjectScripts {
       if (href.indexOf('about:') === 0) return;
       var raw = String(text || '');
       if (raw.indexOf('[CLIENT_ANOMALY]') >= 0 || raw.indexOf('CLIENT_ANOMALY') >= 0) return;
+      if (raw.indexOf('[咸强之王]') >= 0 && kind.indexOf('console') === 0) return;
       if (_reporting) return;
       var now = Date.now();
       if (now - _repWindow > 3000) { _repWindow = now; _repCount = 0; }
-      if (_repCount >= 8) return;
+      // 真弹窗关键字放宽限额；噪音类仍限流
       var key = hit(text);
+      var critical = key && /客户端数据异常|官方最新|C_Battle|GameVersionMisMatch|CODE_GameVer|isLowerVersion/.test(key+raw);
+      if (_repCount >= (critical ? 20 : 8)) return;
       if (!key && kind !== 'fingerprint') return;
       _repCount++;
       _reporting = true;
+      var fp = fingerprint();
+      try {
+        if (critical && typeof window.__xyzwPvpSnapshot === 'function') {
+          fp.pvpSnap = window.__xyzwPvpSnapshot('anomaly:'+key);
+        }
+      } catch (eSnap) {}
       var payload = {
         type: 'clientAnomaly',
         kind: kind,
         key: key || '',
-        text: raw.slice(0, 500),
-        fingerprint: fingerprint(),
-        extra: extra || null
+        text: raw.slice(0, 800),
+        fingerprint: fp,
+        extra: extra || null,
+        critical: !!critical
       };
       // 禁止再用 console.error，否则会再次命中 wrapConsole → 死循环
       try {

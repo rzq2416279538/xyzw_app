@@ -512,14 +512,19 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
         final anomaly = text.contains('CLIENT_ANOMALY') ||
             text.contains('客户端数据异常') ||
             text.contains('官方最新客户端') ||
-            text.contains('客户端异常') ||
-            text.contains('数据异常');
+            text.contains('C_Battle_Tips') ||
+            text.contains('CODE_GameVer_Lower') ||
+            text.contains('GameVersionMisMatch') ||
+            text.contains('RemoteCodeMisMatch');
         final pvp = text.contains('PVP_DIAG') ||
+            text.contains('PVP_VER') ||
+            text.contains('PVP_SNAP') ||
+            text.contains('CHECK_PVP') ||
             text.contains('SUSPECT_MANIFEST_PIN') ||
-            text.contains('盐场') ||
-            text.contains('蟠桃') ||
-            text.contains('isLast') ||
-            text.contains('RejectLowVersionPvP');
+            text.contains('RejectLowVersionPvP') ||
+            text.contains('isLowerVersion') ||
+            text.contains('codeVersion') ||
+            text.contains('BATTLE_VERSION');
         final important = anomaly ||
             pvp ||
             text.contains('咸强之王') ||
@@ -899,6 +904,7 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
         final key = map['key'] as String? ?? '';
         final text = map['text'] as String? ?? '';
         final fp = map['fingerprint'];
+        final critical = map['critical'] == true;
         if (kind == 'fingerprint') {
           AppLog.diag('client', {
             'event': 'fingerprint',
@@ -908,17 +914,29 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
         } else {
           AppLog.e(
             'client',
-            '[$accountId] 客户端异常 key=$key kind=$kind text=$text',
+            '[$accountId] 客户端异常 key=$key kind=$kind critical=$critical text=$text',
           );
           AppLog.diag('client', {
             'event': 'anomaly',
             'accountId': accountId,
             'kind': kind,
             'key': key,
+            'critical': critical,
             'text': text,
             'fp': fp,
           });
         }
+        return;
+      }
+      if (type == 'pvpSnapshot') {
+        final reason = map['reason'] as String? ?? '';
+        final snap = map['snap'];
+        AppLog.diag('pvp', {
+          'event': 'PVP_SNAP',
+          'accountId': accountId,
+          'reason': reason,
+          'snap': snap,
+        });
         return;
       }
       if (type == 'pvpDiag') {
@@ -930,7 +948,7 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
         final line = '[$accountId] ${event.isEmpty ? msg : '$event $msg'}'
             '${url.isEmpty ? '' : ' url=$url'}'
             '${summary == null ? '' : ' summary=$summary'}';
-        if (level == 'W' || level == 'E') {
+        if (level == 'W' || level == 'E' || event == 'CHECK_PVP') {
           AppLog.w('pvp', line);
         } else {
           AppLog.diag('pvp', {

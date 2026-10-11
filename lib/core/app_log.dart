@@ -89,14 +89,20 @@ class AppLog {
     }
     final t = DateTime.now().toIso8601String();
     final line = '$t [$level][$tag] $msg';
-    // lifecycle/game 优先保留：满了先丢非关键行
-    if (_lines.length >= _cap &&
-        (tag == 'lifecycle' || tag == 'game' || tag == 'boot')) {
+    // lifecycle/game/pvp/client 优先保留：满了先丢非关键行
+    final priority = tag == 'lifecycle' ||
+        tag == 'game' ||
+        tag == 'boot' ||
+        tag == 'pvp' ||
+        tag == 'client';
+    if (_lines.length >= _cap && priority) {
       String? victim;
       for (final e in _lines) {
         if (!e.contains('[lifecycle]') &&
             !e.contains('[game]') &&
-            !e.contains('[boot]')) {
+            !e.contains('[boot]') &&
+            !e.contains('[pvp]') &&
+            !e.contains('[client]')) {
           victim = e;
           break;
         }
@@ -126,6 +132,13 @@ class AppLog {
     buf.writeln('咸强之王诊断日志');
     buf.writeln('导出时间: ${DateTime.now().toIso8601String()}');
     buf.writeln('平台: ${Platform.operatingSystem} ${Platform.operatingSystemVersion}');
+    buf.writeln('--- 盐场/蟠桃问题请搜这些关键字 ---');
+    buf.writeln('PVP_SNAP | PVP_VER | CHECK_PVP | RejectLowVersionPvP | codeVersion');
+    buf.writeln('客户端数据异常 | 官方最新客户端 | C_Battle_Tips | isLowerVersion | codeMatch');
+    buf.writeln('风险位 | GameVersionMisMatch | RemoteCodeMisMatch | fingerprint');
+    buf.writeln('关键字段说明: localCODE_VERSION vs remoteCodeVersion 应对齐;');
+    buf.writeln('  risk_lower/risk_rejectOn 为 true 时易弹「客户端数据异常」;');
+    buf.writeln('  CHECK_PVP bypass 表示已拦到进战校验; patches.* 为守卫是否生效');
     buf.writeln('---');
     if (_lines.isEmpty) {
       buf.writeln('（暂无日志）');
