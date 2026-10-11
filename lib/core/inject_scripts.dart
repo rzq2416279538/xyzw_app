@@ -287,10 +287,17 @@ class InjectScripts {
     consoleIsLowerProp: false,
     checkPvpBattle: false,
     isH5: false,
-    codeSynced: false
+    codeSynced: false,
+    hortorCheckSwitch: false,
+    hortorMapForce: false,
+    showTipHook: false
   };
   var _lastSnapJson = '';
   var _checkPvpHits = 0;
+  var _showTipHits = 0;
+  // 游戏 HortorSwitch 用字符串开关名（日志：开关RejectLowVersionPvP true）
+  var FORCE_OFF = { RejectLowVersionPvP: 1 };
+  var FORCE_ON = { FixYanChangClickEvent: 1 };
   function post(obj){
     try {
       if (window.XyzwBridge && window.XyzwBridge.postMessage) {
@@ -389,9 +396,12 @@ class InjectScripts {
       remoteCommit: '',
       manifestIsLast: window.__xyzwManifestIsLast,
       manifestBattleVersion: window.__xyzwManifestBattleVersion,
-      switchReject: (window.__switchStore && window.__switchStore.RejectLowVersionPvP),
+      switchRejectStore: (window.__switchStore && window.__switchStore.RejectLowVersionPvP),
+      switchRejectGame: null,
+      switchFixYanChang: null,
       patches: _patchFlags,
       checkPvpHits: _checkPvpHits,
+      showTipHits: _showTipHits,
       platform: readPlatform(),
       consoleMgr: readConsole(),
       battle: readBattle(),
@@ -404,23 +414,191 @@ class InjectScripts {
         snap.remoteCommit = bv.COMMIT_ID || '';
       }
     } catch (e0) {}
-    snap.codeMatch = !!(snap.remoteCodeVersion && snap.localCODE_VERSION &&
-      snap.remoteCodeVersion === snap.localCODE_VERSION);
+    try {
+      var PM = tryRequire('PlatformManager');
+      var pinst = PM && (PM.PlatformManager && PM.PlatformManager.instance || PM.instance);
+      if (pinst && typeof pinst.checkSwitch === 'function') {
+        try { snap.switchRejectGame = !!pinst.checkSwitch('RejectLowVersionPvP'); } catch (eR) {}
+        try { snap.switchFixYanChang = !!pinst.checkSwitch('FixYanChangClickEvent'); } catch (eF) {}
+      }
+      if (PM && typeof PM.CHECK_SWITCH === 'function') {
+        try { snap.switchRejectExport = !!PM.CHECK_SWITCH('RejectLowVersionPvP'); } catch (eE) {}
+      }
+    } catch (e1) {}
+    snap.codeMatch = !snap.remoteCodeVersion || !snap.localCODE_VERSION ||
+      (snap.remoteCodeVersion === snap.localCODE_VERSION);
     snap.risk_lower = !!(snap.consoleMgr && snap.consoleMgr.isLowerVersion);
-    snap.risk_rejectOn = (snap.switchReject === 1 || snap.switchReject === true || snap.switchReject === '1');
+    snap.risk_rejectOn = !!snap.switchRejectGame;
+    snap.risk_yanChangOff = (snap.switchFixYanChang === false);
     var json = '';
-    try { json = JSON.stringify(snap); } catch (e1) { json = String(snap); }
+    try { json = JSON.stringify(snap); } catch (e2) { json = String(snap); }
     // 相同内容不刷屏；reason 含 force/check/tip 时必打
-    var force = /force|check|tip|anomaly|warn/i.test(String(reason || ''));
+    var force = /force|check|tip|anomaly|warn|SHOW_TIP/i.test(String(reason || ''));
     if (!force && json === _lastSnapJson) return snap;
     _lastSnapJson = json;
     console.log('[咸强之王][PVP_SNAP]', reason, json);
     post({ type: 'pvpSnapshot', reason: String(reason || ''), snap: snap });
-    if (snap.risk_lower || snap.risk_rejectOn || !snap.codeMatch) {
-      warn('风险位', 'isLower='+snap.risk_lower, 'rejectOn='+snap.risk_rejectOn, 'codeMatch='+snap.codeMatch,
+    if (snap.risk_lower || snap.risk_rejectOn || snap.risk_yanChangOff || !snap.codeMatch) {
+      warn('风险位', 'isLower='+snap.risk_lower, 'rejectOn='+snap.risk_rejectOn,
+        'yanChangOff='+snap.risk_yanChangOff, 'codeMatch='+snap.codeMatch,
         'local='+snap.localCODE_VERSION, 'remote='+snap.remoteCodeVersion);
     }
     return snap;
+  }
+  function forceKey(name){
+    var k = String(name || '');
+    if (FORCE_OFF[k] || /RejectLowVersionPvP/i.test(k)) return false;
+    if (FORCE_ON[k] || /FixYanChangClickEvent/i.test(k)) return true;
+    return null;
+  }
+  function forceMap(map){
+    if (!map || typeof map.set !== 'function') return false;
+    try {
+      map.set('RejectLowVersionPvP', false);
+      map.set('FixYanChangClickEvent', true);
+      // 若 key 是枚举数字，按已有 key 名扫一遍
+      try {
+        if (typeof map.forEach === 'function') {
+          map.forEach(function(val, key){
+            var k2 = String(key);
+            if (/RejectLowVersionPvP/i.test(k2)) map.set(key, false);
+            if (/FixYanChangClickEvent/i.test(k2)) map.set(key, true);
+          });
+        }
+      } catch (eF) {}
+      if (!map.set.__xyzwPvpPatched) {
+        var oldSet = map.set.bind(map);
+        var setWrap = function(key, val){
+          var forced = forceKey(key);
+          if (forced !== null) val = forced;
+          return oldSet(key, val);
+        };
+        setWrap.__xyzwPvpPatched = true;
+        map.set = setWrap;
+      }
+      return true;
+    } catch (e) { return false; }
+  }
+  function patchHortorSwitches(){
+    // 关键：游戏 CHECK_SWITCH → PlatformManager.checkSwitch
+    // 优先读 this._config，否则读 _platform(HortorSwitch)._switchResult
+    // HSDK.__switchStore 改了没用（今晚日志已证实：仍打印 开关RejectLowVersionPvP true）
+    try {
+      var PM = tryRequire('PlatformManager');
+      var inst = PM && (PM.PlatformManager && PM.PlatformManager.instance || PM.instance);
+      if (inst) {
+        // 先改 _config（优先级最高）
+        if (forceMap(inst._config)) {
+          _patchFlags.hortorMapForce = true;
+          if (!_patchFlags.hortorCheckSwitch) log('forced PlatformManager._config Reject=false YanChang=true');
+        }
+        if (typeof inst.checkSwitch === 'function' && !inst.checkSwitch.__xyzwPvpPatched) {
+          var orig = inst.checkSwitch.bind(inst);
+          var wrapped = function(id, defv){
+            var key = (id == null) ? '' : String(id);
+            var forced = forceKey(key);
+            if (forced !== null) return forced;
+            return orig(id, defv);
+          };
+          wrapped.__xyzwPvpPatched = true;
+          inst.checkSwitch = wrapped;
+          _patchFlags.hortorCheckSwitch = true;
+          log('patched PlatformManager.checkSwitch');
+        }
+        // 深入 _platform 上的 HortorSwitch
+        try {
+          var plat = inst._platform;
+          if (plat) {
+            if (forceMap(plat._switchResult)) {
+              _patchFlags.hortorMapForce = true;
+              log('forced _platform._switchResult');
+            }
+            if (typeof plat.checkSwitch === 'function' && !plat.checkSwitch.__xyzwPvpPatched) {
+              var op = plat.checkSwitch.bind(plat);
+              var wp = function(id, defv){
+                var key = (id == null) ? '' : String(id);
+                var forced = forceKey(key);
+                if (forced !== null) return forced;
+                return op(id, defv);
+              };
+              wp.__xyzwPvpPatched = true;
+              plat.checkSwitch = wp;
+              log('patched _platform.checkSwitch');
+            }
+            for (var pk in plat) {
+              try {
+                var pv = plat[pk];
+                if (pv && pv._switchResult && forceMap(pv._switchResult)) {
+                  _patchFlags.hortorMapForce = true;
+                }
+              } catch (eP) {}
+            }
+          }
+        } catch (ePlat) {}
+      }
+      if (PM && typeof PM.CHECK_SWITCH === 'function' && !PM.CHECK_SWITCH.__xyzwPvpPatched) {
+        var orig2 = PM.CHECK_SWITCH;
+        var wrapped2 = function(id, defv){
+          var key = (id == null) ? '' : String(id);
+          var forced = forceKey(key);
+          if (forced !== null) return forced;
+          return orig2(id, defv);
+        };
+        wrapped2.__xyzwPvpPatched = true;
+        PM.CHECK_SWITCH = wrapped2;
+        log('patched CHECK_SWITCH export');
+      }
+    } catch (e0) {}
+    try {
+      var HS = tryRequire('HortorSwitch');
+      var hInst = HS && (HS.HortorSwitch && HS.HortorSwitch.instance);
+      if (hInst && forceMap(hInst._switchResult)) {
+        _patchFlags.hortorMapForce = true;
+        log('forced HortorSwitch.instance map');
+      }
+    } catch (e3) {}
+  }
+  function hookShowTip(){
+    try {
+      // 多模块导出 SHOW_TIP；尽量钩常见名
+      var names = ['UIHelper', 'TipManager', 'MessageManager'];
+      for (var i = 0; i < names.length; i++) {
+        var mod = tryRequire(names[i]);
+        if (!mod) continue;
+        var fn = mod.SHOW_TIP || (mod.default && mod.default.SHOW_TIP);
+        if (typeof fn !== 'function' || fn.__xyzwTipPatched) continue;
+        var orig = fn;
+        var wrapped = function(msg){
+          try {
+            _showTipHits++;
+            var s = (msg == null) ? '' : String(msg);
+            log('SHOW_TIP', s.slice(0, 200));
+            snapshot('SHOW_TIP:'+s.slice(0,80));
+            post({ type: 'pvpDiag', level: 'W', event: 'SHOW_TIP', message: s.slice(0, 300) });
+            // 盐场异常文案：记录后吞掉，避免只弹窗无日志
+            if (/客户端数据异常|官方最新客户端|C_Battle_Tips|版本过低/.test(s)) {
+              warn('拦截异常提示', s.slice(0, 120));
+              post({
+                type: 'clientAnomaly',
+                kind: 'SHOW_TIP',
+                key: '客户端数据异常',
+                text: s.slice(0, 500),
+                critical: true,
+                fingerprint: { via: 'SHOW_TIP', pvp: true }
+              });
+              return;
+            }
+          } catch (e0) {}
+          return orig.apply(this, arguments);
+        };
+        wrapped.__xyzwTipPatched = true;
+        if (mod.SHOW_TIP) mod.SHOW_TIP = wrapped;
+        if (mod.default && mod.default.SHOW_TIP) mod.default.SHOW_TIP = wrapped;
+        _patchFlags.showTipHook = true;
+        log('patched SHOW_TIP via', names[i]);
+      }
+    } catch (e) {}
+    // 全局兜底：监听 fgui / 常见 tip 通道较难；再钩 console 已有
   }
   // 暴露给异常侦测：弹窗时附带快照
   window.__xyzwPvpSnapshot = function(reason){ return snapshot(reason || 'external'); };
@@ -560,14 +738,15 @@ class InjectScripts {
       }
     } catch (e) {}
   }
-  // 监听游戏自己打的开关/版本日志，立刻出快照
+  // 监听游戏自己打的开关/版本日志，立刻改 HortorSwitch 并出快照
   try {
     var _w = console.warn;
     if (typeof _w === 'function' && !_w.__xyzwPvpWarnHook) {
       var hw = function(){
         try {
           var text = Array.prototype.slice.call(arguments).map(String).join(' ');
-          if (/RejectLowVersionPvP|isLast,\s*codeVersion|BATTLE_VERSION|GameVersionMisMatch|RemoteCodeMisMatch|CODE_GameVer_Lower|C_Battle_Tips/i.test(text)) {
+          if (/RejectLowVersionPvP|FixYanChangClickEvent|isLast,\s*codeVersion|BATTLE_VERSION|GameVersionMisMatch|RemoteCodeMisMatch|CODE_GameVer_Lower|C_Battle_Tips/i.test(text)) {
+            patchHortorSwitches();
             snapshot('warn:'+text.slice(0,120));
           }
         } catch (e0) {}
@@ -582,6 +761,8 @@ class InjectScripts {
     syncCodeVersion();
     softIsH5();
     markLastVersion();
+    patchHortorSwitches();
+    if (n === 3 || n === 10 || n === 25) hookShowTip();
     if (n === 0 || n === 5 || n === 15 || n === 30 || n % 20 === 0) {
       snapshot('tick_'+n);
     }

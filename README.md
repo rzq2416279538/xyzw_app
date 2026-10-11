@@ -77,8 +77,8 @@ flutter run -d <iphone>
 3. 将日志发给开发者；优先搜索：  
    - 登录：`拦截XHR`、`BIN`、`roleId`  
    - 比赛踢线/客户端异常：`CLIENT_ANOMALY`、`[client]`、`客户端数据异常`、`fingerprint`  
-   - 盐场/蟠桃：`PVP_SNAP`、`PVP_VER`、`CHECK_PVP`、`RejectLowVersionPvP`、`codeVersion`、`codeMatch`、`isLowerVersion`、`风险位`  
-   - 对照：`localCODE_VERSION` 应等于 `remoteCodeVersion`；`CHECK_PVP bypass` 表示进战校验已拦到  
+   - 盐场/蟠桃：`PVP_SNAP`、`PVP_VER`、`CHECK_PVP`、`SHOW_TIP`、`RejectLowVersionPvP`、`FixYanChangClickEvent`、`风险位`  
+   - 对照：`switchRejectGame` 应为 false；`switchFixYanChang` 应为 true；`hortorCheckSwitch`/`hortorMapForce` 应为 true  
 
 ## 无自有服务器时的「在线更新」
 
