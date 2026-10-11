@@ -394,10 +394,36 @@ window.loadRemoteBundleVers = async function () {
 
   const bundleVers = window.parseRemoteBundleVers(settingsObj)
   Object.assign(window._CCSettings.bundleVers, bundleVers)
+  // iOS 壳常被当成 isNative：IsLastVersion = (CODE_VERSION === remote.codeVersion)
+  // 不同步则盐场/蟠桃会弹「客户端数据异常」。
+  try {
+    const body = settingsObj && (settingsObj.body || settingsObj)
+    if (bundleVers && bundleVers.codeVersion) {
+      if (typeof globalThis !== 'undefined') {
+        globalThis.CODE_VERSION = String(bundleVers.codeVersion)
+        if (typeof globalThis.GAME_VERSION === 'string') {
+          globalThis.GAME_VERSION = String(bundleVers.codeVersion) + '-wx'
+        }
+      }
+      if (typeof window !== 'undefined') {
+        window.CODE_VERSION = String(bundleVers.codeVersion)
+      }
+    }
+    if (body && body.isLast != null) {
+      window.__xyzwManifestIsLast = !!body.isLast
+    }
+    if (body && body.battleVersion != null) {
+      window.__xyzwManifestBattleVersion = body.battleVersion
+    }
+  } catch (e) {}
   console.log('[remoteAssets] 远程版本已拉取', {
     launcher: bundleVers.launcher,
     game: bundleVers.game,
-    COMMIT_ID: bundleVers.COMMIT_ID
+    COMMIT_ID: bundleVers.COMMIT_ID,
+    codeVersion: bundleVers.codeVersion,
+    syncedCODE_VERSION: (typeof CODE_VERSION !== 'undefined' ? CODE_VERSION : null),
+    isLast: window.__xyzwManifestIsLast,
+    battleVersion: window.__xyzwManifestBattleVersion
   })
 }
 

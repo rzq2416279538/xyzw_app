@@ -151,24 +151,35 @@ class InjectScripts {
   }
   function summarizeManifest(obj){
     if (!obj || typeof obj !== 'object') return { parse: false };
+    // 线上 Login_ManifestResp 形如 {cmd,body:{isLast,battleVersion,bundleVers,...}}
     var root = obj;
-    var data = obj.data || obj.rawData || obj;
+    var data = obj.body || obj.data || obj.rawData || obj;
+    var bv = data && data.bundleVers;
+    var codeVersion = '';
+    try {
+      if (typeof bv === 'string') bv = JSON.parse(bv);
+      if (bv && typeof bv === 'object') codeVersion = bv.codeVersion || '';
+    } catch (e0) {}
     var out = {
       parse: true,
-      isLast: root.isLast,
-      data_isLast: data && data.isLast,
-      forceUpdate: root.forceUpdate != null ? root.forceUpdate : (data && data.forceUpdate),
-      forceVer: root.forceVer != null ? root.forceVer : (data && data.forceVer),
-      latestVer: root.latestVer != null ? root.latestVer : (data && data.latestVer),
-      battleVersion: root.battleVersion != null ? root.battleVersion : (data && data.battleVersion),
-      dataBundleVer: root.dataBundleVer || (data && data.dataBundleVer) || '',
-      dataVers: root.dataVers || (data && data.dataVers) || '',
-      serverUrl: root.serverUrl || (data && data.serverUrl) || '',
-      bundleVersType: typeof (root.bundleVers != null ? root.bundleVers : (data && data.bundleVers))
+      isLast: data && data.isLast,
+      root_isLast: root.isLast,
+      forceUpdate: data && data.forceUpdate,
+      forceVer: data && data.forceVer,
+      latestVer: data && data.latestVer,
+      battleVersion: data && data.battleVersion,
+      codeVersion: codeVersion,
+      localCODE_VERSION: (typeof CODE_VERSION !== 'undefined' ? String(CODE_VERSION) : ''),
+      dataBundleVer: (data && data.dataBundleVer) || '',
+      dataVers: (data && data.dataVers) || '',
+      serverUrl: (data && data.serverUrl) || '',
+      bundleVersType: typeof (data && data.bundleVers)
     };
-    // 和光回归：钉 isLast=true + 清空 latestVer 会让盐场/蟠桃活动 bundle 不拉
-    out.risk_pinIsLast = (out.isLast === true || out.data_isLast === true);
+    out.codeMatch = !!(out.codeVersion && out.localCODE_VERSION && out.codeVersion === out.localCODE_VERSION);
+    // 和光回归：客户端钉 isLast + 清空 latestVer 会让活动 bundle 不拉（服务端自带 isLast=true 正常）
+    out.risk_pinIsLast = (out.isLast === true && out.latestVer === '');
     out.risk_emptyLatest = (out.latestVer === '' || out.latestVer === null);
+    out.risk_codeMismatch = !!(out.codeVersion && out.localCODE_VERSION && !out.codeMatch);
     return out;
   }
   function inspectBody(url, text, tag){
@@ -264,21 +275,181 @@ class InjectScripts {
 })();
 ''';
 
+  /// 盐场/蟠桃「客户端数据异常」修复：
+  /// 游戏 CHECK_PVP_BATTLE_VERSION 在 RejectLowVersionPvP=on 且
+  /// ConsoleManager.isLowerVersion 时弹 C_Battle_Tips_1。
+  /// isLowerVersion 来自 checkGameVer：非 (IsLastVersion|isDev|isH5|isAudit)。
+  /// iOS 壳常被当成 isNative，用 CODE_VERSION===remote.codeVersion；
+  /// 本地 game-defines 过旧时 IsLastVersion=false → 误拒。
+  static const pvpVersionGuard = r'''
+(function(){
+  if (window.__xyzwPvpVerGuard) return;
+  window.__xyzwPvpVerGuard = true;
+  function post(obj){
+    try {
+      if (window.XyzwBridge && window.XyzwBridge.postMessage) {
+        window.XyzwBridge.postMessage(JSON.stringify(obj));
+      }
+    } catch (e) {}
+  }
+  function log(){
+    try {
+      var args = Array.prototype.slice.call(arguments);
+      console.log.apply(console, ['[咸强之王][PVP_VER]'].concat(args));
+      post({ type: 'pvpDiag', level: 'I', message: 'PVP_VER ' + args.map(String).join(' ') });
+    } catch (e) {}
+  }
+  function forceRejectOff(){
+    try {
+      if (!window.__switchStore || typeof window.__switchStore !== 'object') {
+        window.__switchStore = {};
+      }
+      if (window.__switchStore.RejectLowVersionPvP) {
+        window.__switchStore.RejectLowVersionPvP = 0;
+        log('force RejectLowVersionPvP=0');
+      } else {
+        window.__switchStore.RejectLowVersionPvP = 0;
+      }
+    } catch (e) {}
+    try {
+      var h = window.HSDK;
+      if (h && typeof h.checkSwitches === 'function' && !h.checkSwitches.__xyzwPvpPatched) {
+        var orig = h.checkSwitches.bind(h);
+        var wrapped = function(args){
+          var ret = orig(args);
+          try {
+            if (ret && typeof ret.then === 'function') {
+              return ret.then(function(data){
+                if (data && typeof data === 'object') data.RejectLowVersionPvP = 0;
+                return data;
+              });
+            }
+            if (ret && typeof ret === 'object') ret.RejectLowVersionPvP = 0;
+          } catch (e2) {}
+          return ret;
+        };
+        wrapped.__xyzwPvpPatched = true;
+        h.checkSwitches = wrapped;
+        log('patched HSDK.checkSwitches');
+      }
+    } catch (e3) {}
+  }
+  function syncCodeVersion(){
+    try {
+      var remote = null;
+      if (window._CCSettings && window._CCSettings.bundleVers && window._CCSettings.bundleVers.codeVersion) {
+        remote = String(window._CCSettings.bundleVers.codeVersion);
+      }
+      if (remote) {
+        if (typeof CODE_VERSION !== 'undefined') {
+          try { CODE_VERSION = remote; } catch (e0) {}
+        }
+        try { window.CODE_VERSION = remote; } catch (e1) {}
+        try { if (typeof globalThis !== 'undefined') globalThis.CODE_VERSION = remote; } catch (e2) {}
+        log('sync CODE_VERSION', remote);
+      }
+    } catch (e) {}
+  }
+  function tryRequire(name){
+    try {
+      if (typeof window.__require === 'function') return window.__require(name);
+    } catch (e) {}
+    return null;
+  }
+  function markLastVersion(){
+    var ok = false;
+    try {
+      var CM = tryRequire('ConsoleManager');
+      var inst = CM && (CM.ConsoleManager && CM.ConsoleManager.instance || CM.instance);
+      if (inst) {
+        inst._isLowerVersion = false;
+        if (typeof inst.checkGameVer === 'function' && !inst.checkGameVer.__xyzwPatched) {
+          var old = inst.checkGameVer.bind(inst);
+          var wrapped = function(){
+            // 始终视为最新版，避免盐场弹 C_Battle_Tips_1
+            inst._isLowerVersion = false;
+            try { old(); } catch (e5) {}
+            inst._isLowerVersion = false;
+          };
+          wrapped.__xyzwPatched = true;
+          inst.checkGameVer = wrapped;
+          log('patched ConsoleManager.checkGameVer');
+        }
+        try {
+          Object.defineProperty(inst, 'isLowerVersion', {
+            configurable: true,
+            enumerable: true,
+            get: function(){ return false; },
+            set: function(){}
+          });
+        } catch (eProp) {}
+        ok = true;
+      }
+    } catch (e6) {}
+    try {
+      var BU = tryRequire('BattleUIManager');
+      if (BU && typeof BU.CHECK_PVP_BATTLE_VERSION === 'function' && !BU.CHECK_PVP_BATTLE_VERSION.__xyzwPatched) {
+        var always = function(){ return true; };
+        always.__xyzwPatched = true;
+        BU.CHECK_PVP_BATTLE_VERSION = always;
+        log('patched CHECK_PVP_BATTLE_VERSION → always true');
+        ok = true;
+      }
+    } catch (e7) {}
+    return ok;
+  }
+  function softIsH5(){
+    try {
+      var req = window.__require;
+      if (typeof req !== 'function') return;
+      var PM = null;
+      try { PM = req('PlatformManager'); } catch (e0) {}
+      var inst = PM && (PM.PlatformManager && PM.PlatformManager.instance || PM.instance);
+      if (!inst) return;
+      try {
+        Object.defineProperty(inst, 'isH5', {
+          configurable: true,
+          enumerable: true,
+          get: function(){ return true; },
+          set: function(){}
+        });
+        log('PlatformManager.isH5 forced true');
+      } catch (e1) {
+        try { inst.isH5 = true; log('PlatformManager.isH5 assigned true'); } catch (e2) {}
+      }
+    } catch (e) {}
+  }
+  function tick(n){
+    forceRejectOff();
+    syncCodeVersion();
+    softIsH5();
+    markLastVersion();
+    if (n < 40) setTimeout(function(){ tick(n + 1); }, n < 10 ? 300 : 1000);
+  }
+  forceRejectOff();
+  setTimeout(function(){ tick(0); }, 0);
+  console.log('[咸强之王][PVP_VER] 盐场版本守卫已启动');
+})();
+''';
+
   /// 比赛/踢线常见「客户端数据异常」侦测：抓弹窗、toast、console，并上报指纹便于对照。
   static const clientAnomalyWatch = r'''
 (function(){
   if (window.__xyzwClientWatch) return;
   window.__xyzwClientWatch = true;
   var KEYS = [
-    '客户端数据异常', '官方最新客户端', '请使用官方', '数据异常',
-    '客户端异常', '版本过低', '强制更新', '登录失效', '异地登录',
-    '连接已断开', '网络异常', '重新登录', '账号在其他', '被踢',
-    '盐场', '蟠桃', '点不了', 'RejectLowVersionPvP', '低版本',
+    '客户端数据异常', '官方最新客户端', '请使用官方',
+    '版本过低', '强制更新', '登录失效', '异地登录',
+    '连接已断开', '重新登录', '账号在其他', '被踢',
+    'RejectLowVersionPvP', 'GameVersionMisMatch', 'RemoteCodeMisMatch',
+    'C_Battle_Tips_1', 'CODE_GameVer_Lower', 'isLowerVersion',
     'client data', 'illegal client', 'official client'
   ];
   function hit(text){
     var s = String(text || '');
     if (!s) return null;
+    // 忽略我们自己的诊断日志，避免假阳性淹没真弹窗
+    if (s.indexOf('[咸强之王]') >= 0) return null;
     for (var i = 0; i < KEYS.length; i++) {
       if (s.indexOf(KEYS[i]) >= 0) return KEYS[i];
     }

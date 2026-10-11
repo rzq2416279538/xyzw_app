@@ -67,3 +67,7 @@ accounts.json
 app-release.apk
 build_log.txt
 /tool_gen_icons.py
+
+# local decrypt scratch
+.tmp_game.js
+

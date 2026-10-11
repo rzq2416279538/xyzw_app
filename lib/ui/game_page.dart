@@ -569,6 +569,7 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
                 '${InjectScripts.appLifecycleBridge}\n'
                 '${InjectScripts.clientAnomalyWatch}\n'
                 '${InjectScripts.pvpDiagWatch}\n'
+                '${InjectScripts.pvpVersionGuard}\n'
                 '${InjectScripts.lateSdkReady}\nwindow.__xyzwRoleBridge=false;\n'
                 '${InjectScripts.roleBridge}\n${InjectScripts.gameReadyWatch}',
               );
@@ -811,6 +812,7 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
       '${InjectScripts.appLifecycleBridge}\n'
       '${InjectScripts.clientAnomalyWatch}\n'
       '${InjectScripts.pvpDiagWatch}\n'
+      '${InjectScripts.pvpVersionGuard}\n'
       '${InjectScripts.persistGamePrefs}\n'
       '${prefs.isEmpty ? '' : InjectScripts.restoreGamePrefs(prefs)}',
     );

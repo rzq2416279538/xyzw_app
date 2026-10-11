@@ -1587,6 +1587,10 @@
           }
         }
       }
+      // 与预取一致：比赛低版本拒绝开关对本壳始终关闭
+      if (data.hasOwnProperty("RejectLowVersionPvP")) {
+        data.RejectLowVersionPvP = 0;
+      }
 
       console.log("[HSDK-Mock] checkSwitches data:", data);
 
@@ -2079,12 +2083,16 @@
         } else {
           data = getDefaultSwitchData();
         }
+        // 盐场/蟠桃：服务端常开 RejectLowVersionPvP；壳端版本比对易误伤，强制关闭
+        data.RejectLowVersionPvP = 0;
         window.__switchStore = data;
-        console.log("[HSDK-Mock] Switch data stored");
+        console.log("[HSDK-Mock] Switch data stored (RejectLowVersionPvP forced off)");
       })
       .catch(function (err) {
         console.error("[HSDK-Mock] Pre-fetch switches failed:", err);
-        window.__switchStore = getDefaultSwitchData();
+        var fallback = getDefaultSwitchData();
+        fallback.RejectLowVersionPvP = 0;
+        window.__switchStore = fallback;
       });
   })();
 })();
