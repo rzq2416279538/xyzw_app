@@ -554,7 +554,20 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
 
       await controller.setNavigationDelegate(
         NavigationDelegate(
+          onNavigationRequest: (req) {
+            final url = req.url;
+            // 油猴脚本常触发 blob:/data: 主导航，会冲掉游戏页与注入（日志里 page_started=blob）
+            if (url.startsWith('blob:') || url.startsWith('data:')) {
+              AppLog.w('game', '拦截主导航 $url');
+              return NavigationDecision.prevent;
+            }
+            return NavigationDecision.navigate;
+          },
           onPageStarted: (url) {
+            if (url.startsWith('blob:') || url.startsWith('data:')) {
+              AppLog.w('game', '忽略 blob/data page_started');
+              return;
+            }
             AppLog.diag('game', {
               'event': 'page_started',
               'accountId': accountId,
@@ -565,6 +578,9 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
             unawaited(_queueInject(accountId, controller, account, 'page_started'));
           },
           onPageFinished: (url) async {
+            if (url.startsWith('blob:') || url.startsWith('data:')) {
+              return;
+            }
             AppLog.diag('game', {
               'event': 'page_finished',
               'accountId': accountId,

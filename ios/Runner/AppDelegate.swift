@@ -1,4 +1,5 @@
 import Flutter
+import Photos
 import UIKit
 
 @main
@@ -26,11 +27,10 @@ import UIKit
     guard let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "XyzwBackground") else {
       return
     }
-    let channel = FlutterMethodChannel(
-      name: "xyzw/background",
-      binaryMessenger: registrar.messenger()
-    )
-    channel.setMethodCallHandler { [weak self] call, result in
+    let messenger = registrar.messenger()
+
+    let bg = FlutterMethodChannel(name: "xyzw/background", binaryMessenger: messenger)
+    bg.setMethodCallHandler { [weak self] call, result in
       switch call.method {
       case "begin":
         self?.beginGameKeepAlive()
@@ -40,6 +40,78 @@ import UIKit
         result(true)
       default:
         result(FlutterMethodNotImplemented)
+      }
+    }
+
+    let media = FlutterMethodChannel(name: "xyzw/media", binaryMessenger: messenger)
+    media.setMethodCallHandler { call, result in
+      switch call.method {
+      case "saveImageBase64":
+        Self.saveImageBase64(call.arguments, result: result)
+      default:
+        result(FlutterMethodNotImplemented)
+      }
+    }
+  }
+
+  private static func saveImageBase64(_ arguments: Any?, result: @escaping FlutterResult) {
+    guard
+      let args = arguments as? [String: Any],
+      let b64 = args["base64"] as? String
+    else {
+      result(FlutterError(code: "bad_args", message: "base64 required", details: nil))
+      return
+    }
+    var raw = b64.trimmingCharacters(in: .whitespacesAndNewlines)
+    if raw.hasPrefix("data:"), let range = raw.range(of: "base64,") {
+      raw = String(raw[range.upperBound...])
+    }
+    guard let data = Data(base64Encoded: raw, options: .ignoreUnknownCharacters),
+          let image = UIImage(data: data)
+    else {
+      result(FlutterError(code: "bad_image", message: "decode failed", details: nil))
+      return
+    }
+
+    let write: () -> Void = {
+      PHPhotoLibrary.shared().performChanges({
+        PHAssetChangeRequest.creationRequestForAsset(from: image)
+      }) { ok, error in
+        DispatchQueue.main.async {
+          if ok {
+            result(true)
+          } else {
+            result(
+              FlutterError(
+                code: "save_failed",
+                message: error?.localizedDescription ?? "unknown",
+                details: nil
+              )
+            )
+          }
+        }
+      }
+    }
+
+    if #available(iOS 14, *) {
+      PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
+        if status == .authorized || status == .limited {
+          write()
+        } else {
+          DispatchQueue.main.async {
+            result(FlutterError(code: "denied", message: "photo add denied", details: nil))
+          }
+        }
+      }
+    } else {
+      PHPhotoLibrary.requestAuthorization { status in
+        if status == .authorized {
+          write()
+        } else {
+          DispatchQueue.main.async {
+            result(FlutterError(code: "denied", message: "photo denied", details: nil))
+          }
+        }
       }
     }
   }

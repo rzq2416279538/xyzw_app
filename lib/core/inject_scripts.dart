@@ -2049,8 +2049,15 @@ try {
   /// 强制竖屏：键盘弹出后 innerHeight 变矮，Cocos 会误判横屏并旋转画布。
   static const portraitLock = r'''
 (function(){
-  if (window.__xyzwPortraitLock) return;
-  window.__xyzwPortraitLock = true;
+  if (window.__xyzwPortraitLockV2) return;
+  window.__xyzwPortraitLockV2 = true;
+  function stripRotate(el){
+    if (!el || !el.style) return;
+    var t = el.style.transform || '';
+    if (/rotate\s*\(/i.test(t)) {
+      el.style.transform = t.replace(/rotate\s*\([^)]*\)/ig, 'rotate(0deg)');
+    }
+  }
   function forcePortrait(){
     try {
       if (window.screen && screen.orientation && screen.orientation.lock) {
@@ -2059,47 +2066,52 @@ try {
     } catch (e0) {}
     try {
       if (typeof cc !== 'undefined' && cc.view && cc.macro) {
-        cc.view.setOrientation(cc.macro.ORIENTATION_PORTRAIT);
-        if (typeof cc.view._orientation !== 'undefined') {
-          cc.view._orientation = cc.macro.ORIENTATION_PORTRAIT;
+        try { cc.view.setOrientation(cc.macro.ORIENTATION_PORTRAIT); } catch (eA) {}
+        try { cc.view._orientation = cc.macro.ORIENTATION_PORTRAIT; } catch (eB) {}
+        try {
+          Object.defineProperty(cc.view, '_isRotated', {
+            configurable: true,
+            get: function(){ return false; },
+            set: function(){}
+          });
+        } catch (eC) {
+          try { cc.view._isRotated = false; } catch (eD) {}
+        }
+        if (typeof cc.view.setOrientation === 'function' && !cc.view.setOrientation.__xyzwP) {
+          var _so = cc.view.setOrientation.bind(cc.view);
+          cc.view.setOrientation = function(){
+            return _so(cc.macro.ORIENTATION_PORTRAIT);
+          };
+          cc.view.setOrientation.__xyzwP = true;
         }
       }
     } catch (e1) {}
     try {
-      var canvas = document.getElementById('GameCanvas');
-      if (canvas && canvas.style) {
-        var t = canvas.style.transform || '';
-        if (/rotate\s*\(\s*90deg\s*\)/i.test(t) || /rotate\s*\(\s*-90deg\s*\)/i.test(t)) {
-          canvas.style.transform = t.replace(/rotate\s*\(\s*-?90deg\s*\)/ig, 'rotate(0deg)');
-        }
-      }
-      var body = document.body;
-      if (body && body.style && /rotate\s*\(\s*-?90deg\s*\)/i.test(body.style.transform || '')) {
-        body.style.transform = 'none';
-      }
+      stripRotate(document.getElementById('GameCanvas'));
+      stripRotate(document.getElementById('Cocos2dGameContainer'));
+      stripRotate(document.body);
+      stripRotate(document.documentElement);
     } catch (e2) {}
   }
   forcePortrait();
   window.addEventListener('resize', forcePortrait, true);
   window.addEventListener('orientationchange', forcePortrait, true);
+  window.addEventListener('focus', forcePortrait, true);
+  document.addEventListener('focusin', forcePortrait, true);
   if (window.visualViewport) {
     window.visualViewport.addEventListener('resize', forcePortrait);
   }
-  var n = 0;
-  var iv = setInterval(function(){
-    forcePortrait();
-    if (++n > 40) clearInterval(iv);
-  }, 500);
-  console.log('[咸强之王][media] portraitLock on');
+  setInterval(forcePortrait, 800);
+  console.log('[咸强之王][media] portraitLock v2 on');
 })();
 ''';
 
-  /// 相册能力：直接补丁 PlatformManager / HSDK，不依赖 renderer 缓存里的旧 hsdk-mock。
+  /// 相册能力：锁定 HSDK/PlatformManager（防 turnpass 盖掉），并记录 SHOW_TIP。
   /// PlatformH5：chooseImage([512,98]) / saveImage({imagePath:dataUrl})
   static const mediaBridge = r'''
 (function(){
-  if (window.__xyzwMediaBridgePatch) return;
-  window.__xyzwMediaBridgePatch = true;
+  if (window.__xyzwMediaBridgePatchV2) return;
+  window.__xyzwMediaBridgePatchV2 = true;
   window.__xyzwMediaCb = window.__xyzwMediaCb || {};
   window.__xyzwMediaPayload = window.__xyzwMediaPayload || {};
   window.__xyzwMediaDone = function(id, result){
@@ -2130,6 +2142,7 @@ try {
     return new Promise(function(resolve){
       var id = 'c' + Date.now() + '_' + Math.floor(Math.random() * 1e6);
       window.__xyzwMediaCb[id] = function(r){
+        console.warn('[咸强之王][media] chooseImage done', id, r && r.errCode, r && r.base64s && r.base64s.length);
         resolve(r || { errCode: -1, base64s: [] });
       };
       console.warn('[咸强之王][media] chooseImage', id, imageSize);
@@ -2149,6 +2162,7 @@ try {
       }
       window.__xyzwMediaPayload[id] = base64;
       window.__xyzwMediaCb[id] = function(r){
+        console.warn('[咸强之王][media] saveImage done', id, r && r.errCode);
         if (r && r.errCode === 0) resolve(r);
         else reject(r || { errCode: -1, errMsg: 'save fail' });
       };
@@ -2169,7 +2183,9 @@ try {
   }
   function hsdkSaveImage(callback, options){
     var opts = options;
-    if ((!opts || opts.base64 == null) && callback && typeof callback === 'object') opts = callback;
+    if ((!opts || (opts.base64 == null && opts.imagePath == null)) && callback && typeof callback === 'object') {
+      opts = callback;
+    }
     saveImagePromise(opts || {}).then(function(r){
       if (typeof callback === 'function') callback(r);
     }).catch(function(r){
@@ -2178,6 +2194,19 @@ try {
   }
   hsdkChooseImage.__xyzwMedia = true;
   hsdkSaveImage.__xyzwMedia = true;
+  function lockFn(obj, name, fn){
+    if (!obj) return;
+    try {
+      Object.defineProperty(obj, name, {
+        configurable: true,
+        enumerable: true,
+        get: function(){ return fn; },
+        set: function(){ /* 忽略外部覆盖 */ }
+      });
+    } catch (e) {
+      try { obj[name] = fn; } catch (e2) {}
+    }
+  }
   function tryRequire(name){
     try {
       if (typeof window.__require === 'function') return window.__require(name);
@@ -2188,10 +2217,8 @@ try {
     try {
       var targets = [window.HSDK, window.__HORTOR_SDK__, window.wx];
       for (var i = 0; i < targets.length; i++) {
-        var t = targets[i];
-        if (!t) continue;
-        t.chooseImage = hsdkChooseImage;
-        t.saveImage = hsdkSaveImage;
+        lockFn(targets[i], 'chooseImage', hsdkChooseImage);
+        lockFn(targets[i], 'saveImage', hsdkSaveImage);
       }
     } catch (e) {}
   }
@@ -2200,34 +2227,66 @@ try {
       var PM = tryRequire('PlatformManager');
       var inst = PM && (PM.PlatformManager && PM.PlatformManager.instance || PM.instance);
       if (!inst) return false;
-      inst.chooseImage = function(e){ return chooseImagePromise(e); };
-      inst.saveImage = function(e){ return saveImagePromise(e); };
+      lockFn(inst, 'chooseImage', function(e){ return chooseImagePromise(e); });
+      lockFn(inst, 'saveImage', function(e){ return saveImagePromise(e); });
       if (inst._platform) {
-        inst._platform.chooseImage = function(e){ return chooseImagePromise(e); };
-        inst._platform.saveImage = function(e){ return saveImagePromise(e); };
+        lockFn(inst._platform, 'chooseImage', function(e){ return chooseImagePromise(e); });
+        lockFn(inst._platform, 'saveImage', function(e){ return saveImagePromise(e); });
       }
+      // 也钉原型，防止只走到 prototype
+      try {
+        var proto = Object.getPrototypeOf(inst);
+        if (proto) {
+          lockFn(proto, 'chooseImage', function(e){ return chooseImagePromise(e); });
+          lockFn(proto, 'saveImage', function(e){ return saveImagePromise(e); });
+        }
+      } catch (e3) {}
       if (!window.__xyzwMediaPlatLogged) {
         window.__xyzwMediaPlatLogged = true;
-        var name = '';
-        try { name = inst._platform && (inst._platform.platformName || inst._platform.constructor && inst._platform.constructor.name) || ''; } catch (e2) {}
-        console.warn('[咸强之王][media] PlatformManager patched', name, 'isH5=' + !!inst.isH5);
+        console.warn('[咸强之王][media] PlatformManager locked isH5=' + !!inst.isH5);
       }
       return true;
     } catch (e) {
       return false;
     }
   }
+  // 记录游戏 tip，便于确认「版本太低」文案来源（不改 tip 行为）
+  try {
+    if (!window.__xyzwTipLogHook) {
+      window.__xyzwTipLogHook = true;
+      var tipIv = setInterval(function(){
+        try {
+          var g = window;
+          var names = ['SHOW_TIP','showTip'];
+          for (var i = 0; i < names.length; i++) {
+            var fn = g[names[i]];
+            if (typeof fn === 'function' && !fn.__xyzwTipLog) {
+              g[names[i]] = function(orig){
+                return function(msg){
+                  try {
+                    var s = String(msg == null ? '' : msg);
+                    if (/版本|更新|相册|保存|头像|支持|C_P1|SAVE_TO_ALBUM/i.test(s)) {
+                      console.warn('[咸强之王][media] SHOW_TIP', s.slice(0, 160));
+                    }
+                  } catch (e0) {}
+                  return orig.apply(this, arguments);
+                };
+              }(fn);
+              g[names[i]].__xyzwTipLog = true;
+            }
+          }
+        } catch (e1) {}
+      }, 1000);
+      setTimeout(function(){ clearInterval(tipIv); }, 120000);
+    }
+  } catch (eTip) {}
   function tick(){
     patchHsdk();
     patchPlatform();
   }
   tick();
-  var n = 0;
-  var iv = setInterval(function(){
-    tick();
-    if (++n > 60) clearInterval(iv);
-  }, 500);
-  console.warn('[咸强之王][media] bridge patch installed');
+  setInterval(tick, 1000);
+  console.warn('[咸强之王][media] bridge patch v2 installed');
 })();
 ''';
 

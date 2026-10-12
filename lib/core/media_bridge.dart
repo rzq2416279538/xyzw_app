@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/services.dart';
 import 'package:gal/gal.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
@@ -12,6 +13,7 @@ class MediaBridge {
   MediaBridge._();
 
   static final _picker = ImagePicker();
+  static const _native = MethodChannel('xyzw/media');
 
   /// 选图：返回不含 data: 前缀的 base64 列表（H5 Platform 期望 `base64s`）。
   static Future<Map<String, dynamic>> chooseImage({
@@ -28,6 +30,7 @@ class MediaBridge {
       final useH =
           (maxH >= 64 && maxH >= maxW * 0.35) ? maxH : maxW;
 
+      AppLog.i('media', 'chooseImage open picker max=${maxW.toInt()}x${useH.toInt()}');
       final file = await _picker.pickImage(
         source: ImageSource.gallery,
         maxWidth: maxW.clamp(64, 4096),
@@ -85,7 +88,22 @@ class MediaBridge {
         return {'errCode': -1, 'errMsg': 'decode empty'};
       }
 
-      // 仅「写入相册」权限即可；toAlbum:true 在 Limited 权限下容易假成功/写不到「最近项目」
+      // iOS：优先走原生 PHPhotoLibrary（自签/gal 偶发写不到「最近项目」）
+      if (Platform.isIOS) {
+        try {
+          final ok = await _native.invokeMethod<bool>('saveImageBase64', {
+            'base64': raw,
+          });
+          if (ok == true) {
+            AppLog.i('media', 'saveImage native ok bytes=${bytes.length}');
+            return {'errCode': 0, 'errMsg': 'saveImage:native'};
+          }
+          AppLog.w('media', 'saveImage native returned $ok，改试 gal');
+        } catch (e) {
+          AppLog.w('media', 'saveImage native 失败，改试 gal: $e');
+        }
+      }
+
       final hasAccess = await Gal.hasAccess();
       if (!hasAccess) {
         final ok = await Gal.requestAccess();
@@ -95,9 +113,7 @@ class MediaBridge {
         }
       }
 
-      final name =
-          'xyzw_${DateTime.now().millisecondsSinceEpoch}';
-      // 优先 bytes API（少一层临时文件）；失败再落盘重试
+      final name = 'xyzw_${DateTime.now().millisecondsSinceEpoch}';
       try {
         await Gal.putImageBytes(bytes, name: name);
       } catch (e1) {
@@ -114,7 +130,7 @@ class MediaBridge {
           await file.delete();
         } catch (_) {}
       }
-      AppLog.i('media', 'saveImage ok bytes=${bytes.length}');
+      AppLog.i('media', 'saveImage gal ok bytes=${bytes.length}');
       return {'errCode': 0, 'errMsg': 'saveImage:ok'};
     } catch (e) {
       AppLog.e('media', 'saveImage 失败: $e');
