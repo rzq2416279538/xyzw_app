@@ -2182,16 +2182,20 @@ try {
 ''';
 
   /// 输入法：游戏画面不动；把系统 input 挂进键盘上方白条（可点「完成」）。
+  /// 键盘收起后必须立刻拆掉白条，避免残留在屏幕底部。
   static const imeBridge = r'''
 (function(){
-  if (window.__xyzwImeBridgeV2) return;
-  window.__xyzwImeBridgeV2 = true;
+  if (window.__xyzwImeBridgeV3) return;
+  window.__xyzwImeBridgeV3 = true;
   var bar = null;
   var doneBtn = null;
   var activeEl = null;
   var saved = null;
   var pinTimer = null;
   var committing = false;
+  var baseViewportH = 0;
+  var sawKeyboard = false;
+  var attachedAt = 0;
 
   function pinScroll(){
     try {
@@ -2199,6 +2203,28 @@ try {
       if (document.documentElement) document.documentElement.scrollTop = 0;
       if (document.body) document.body.scrollTop = 0;
     } catch (e0) {}
+  }
+
+  function layoutH(){
+    return Math.max(
+      window.innerHeight || 0,
+      (document.documentElement && document.documentElement.clientHeight) || 0
+    );
+  }
+
+  function visualH(){
+    var vv = window.visualViewport;
+    return (vv && vv.height > 0) ? vv.height : layoutH();
+  }
+
+  // 键盘是否仍抬起：视觉视口明显矮于布局高度
+  function isKeyboardVisible(){
+    var lh = layoutH();
+    var vh = visualH();
+    if (lh <= 0) return false;
+    if (lh - vh >= 100) return true;
+    if (baseViewportH > 0 && baseViewportH - vh >= 80) return true;
+    return vh < lh * 0.86;
   }
 
   function commit(){
@@ -2220,7 +2246,9 @@ try {
         try { el.blur(); } catch (e3) {}
       }
     } finally {
-      setTimeout(function(){ committing = false; }, 120);
+      // 立刻拆条，避免等 focusout 时被 committing 挡掉
+      detach(true);
+      setTimeout(function(){ committing = false; }, 160);
     }
   }
 
@@ -2247,7 +2275,6 @@ try {
       'border-radius:6px', 'font-size:15px', 'font-weight:600',
       'line-height:32px', 'z-index:3', '-webkit-appearance:none'
     ].join(';');
-    // iOS：用 touchend 提交，避免 input 盖住按钮或 click 丢事件
     function onDone(e){
       try { e.preventDefault(); e.stopPropagation(); } catch (e4) {}
       commit();
@@ -2268,7 +2295,6 @@ try {
 
   function styleInput(el){
     var s = el.style;
-    // Cocos 常把文字设成 transparent / opacity:0，这里每帧钉死可见样式
     s.setProperty('position', 'relative', 'important');
     s.setProperty('top', 'auto', 'important');
     s.setProperty('left', 'auto', 'important');
@@ -2304,12 +2330,20 @@ try {
 
   function place(){
     if (!activeEl) return;
+    var kb = isKeyboardVisible();
+    if (kb) sawKeyboard = true;
+    // 曾出现过键盘后又收起，或挂载过久仍无键盘 → 拆条（避免弹起动画阶段误拆）
+    if (!kb && (sawKeyboard || (Date.now() - attachedAt > 900))) {
+      console.warn('[咸强之王][media] ime keyboard gone → hide bar');
+      try { if (document.activeElement === activeEl) activeEl.blur(); } catch (e6) {}
+      detach(true);
+      return;
+    }
     ensureBar();
     var top = barTop();
     bar.style.display = 'flex';
     bar.style.top = top + 'px';
     bar.style.bottom = 'auto';
-    // 保证 input 在按钮左侧
     if (activeEl.parentNode !== bar) {
       bar.insertBefore(activeEl, doneBtn);
     } else if (doneBtn && activeEl.nextSibling !== doneBtn) {
@@ -2332,45 +2366,56 @@ try {
 
   function attach(el){
     if (activeEl === el) { place(); return; }
-    detach(false);
+    detach(true);
     activeEl = el;
     saved = {
       parent: el.parentNode,
       next: el.nextSibling,
       cssText: el.style.cssText
     };
+    baseViewportH = Math.max(visualH(), layoutH());
+    sawKeyboard = false;
+    attachedAt = Date.now();
     ensureBar();
-    try { bar.insertBefore(el, doneBtn); } catch (e6) {}
+    try { bar.insertBefore(el, doneBtn); } catch (e7) {}
+    bar.style.display = 'flex';
     place();
-    try { el.focus(); } catch (e7) {}
+    try { el.focus(); } catch (e8) {}
     if (pinTimer) clearInterval(pinTimer);
     pinTimer = setInterval(place, 80);
-    console.warn('[咸强之王][media] ime attach v2', el.tagName, el.type || '', 'valLen=' + String(el.value || '').length);
+    console.warn('[咸强之王][media] ime attach v3', el.tagName, el.type || '');
   }
 
   function restoreEl(el, info){
     if (!el || !info) return;
     try {
-      if (info.parent) {
+      if (info.parent && info.parent.isConnected !== false) {
         if (info.next && info.next.parentNode === info.parent) {
           info.parent.insertBefore(el, info.next);
         } else {
           info.parent.appendChild(el);
         }
+      } else if (el.parentNode === bar) {
+        try { bar.removeChild(el); } catch (e9) {}
       }
-    } catch (e8) {}
-    try { el.style.cssText = info.cssText || ''; } catch (e9) {}
+    } catch (e10) {}
+    try { el.style.cssText = info.cssText || ''; } catch (e11) {}
   }
 
   function detach(restore){
     if (pinTimer) { clearInterval(pinTimer); pinTimer = null; }
-    if (bar) bar.style.display = 'none';
+    if (bar) {
+      bar.style.display = 'none';
+      bar.style.top = '-9999px';
+    }
     var el = activeEl;
     var info = saved;
     activeEl = null;
     saved = null;
-    if (el && restore) restoreEl(el, info);
-    else if (el && info) restoreEl(el, info);
+    baseViewportH = 0;
+    sawKeyboard = false;
+    attachedAt = 0;
+    if (el && info) restoreEl(el, info);
   }
 
   document.addEventListener('focusin', function(e){
@@ -2383,24 +2428,31 @@ try {
     var el = e.target;
     if (el !== activeEl) return;
     setTimeout(function(){
-      if (committing) return;
-      if (document.activeElement === activeEl) return;
-      // 点完成/键盘勾 都会走到失焦
+      // 完成路径会自己 detach；这里兜底失焦/点空白
+      if (!activeEl) return;
+      if (document.activeElement === activeEl && isKeyboardVisible()) return;
       detach(true);
-    }, 80);
+    }, 100);
   }, true);
 
   document.addEventListener('scroll', function(){
     if (activeEl) pinScroll();
   }, true);
 
-  if (window.visualViewport) {
-    window.visualViewport.addEventListener('resize', function(){ if (activeEl) place(); });
-    window.visualViewport.addEventListener('scroll', function(){ if (activeEl) place(); });
+  function onViewportChange(){
+    if (!activeEl) {
+      if (bar) bar.style.display = 'none';
+      return;
+    }
+    place();
   }
-  window.addEventListener('resize', function(){ if (activeEl) place(); });
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', onViewportChange);
+    window.visualViewport.addEventListener('scroll', onViewportChange);
+  }
+  window.addEventListener('resize', onViewportChange);
 
-  console.log('[咸强之王][media] imeBridge v2 on');
+  console.log('[咸强之王][media] imeBridge v3 on');
 })();
 ''';
 
