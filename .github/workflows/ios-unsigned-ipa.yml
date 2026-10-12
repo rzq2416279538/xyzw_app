@@ -1,5 +1,8 @@
 # 在 GitHub 的免费 macOS 跑器上编「未签名 IPA」，下载后用自签工具安装。
 # 用法：GitHub → Actions →「iOS Unsigned IPA」→ Run workflow
+#
+# 说明：新版 Flutter 在 `flutter build ios --no-codesign` 时仍可能做签名预检
+#（要求 Development Team），因此改为 --config-only + xcodebuild 强制关闭签名。
 name: iOS Unsigned IPA
 
 on:
@@ -19,7 +22,6 @@ jobs:
 
       - name: Select Xcode
         run: |
-          # 尽量用较新的 Xcode（支持新 iOS）；具体列表随镜像变化
           ls /Applications | grep -i Xcode || true
           sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
           xcodebuild -version
@@ -32,8 +34,13 @@ jobs:
 
       - name: Flutter pub get
         run: |
+          # 插件走 CocoaPods，避免 SPM + 自定义 Podfile 混用导致签名/依赖异常
+          flutter config --no-enable-swift-package-manager
           flutter pub get
           flutter precache --ios
+
+      - name: Configure iOS (no Flutter signing preflight)
+        run: flutter build ios --release --no-codesign --config-only
 
       - name: CocoaPods
         working-directory: ios
@@ -41,12 +48,33 @@ jobs:
           test -f Podfile
           pod install --repo-update
 
-      - name: Build iOS release (no codesign)
-        run: flutter build ios --release --no-codesign
+      - name: Xcode build (unsigned)
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -workspace ios/Runner.xcworkspace \
+            -scheme Runner \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build/ios-dd \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY= \
+            CODE_SIGN_STYLE=Manual \
+            DEVELOPMENT_TEAM= \
+            PROVISIONING_PROFILE_SPECIFIER= \
+            build
+
+          APP="build/ios-dd/Build/Products/Release-iphoneos/Runner.app"
+          test -d "$APP"
+          mkdir -p build/ios/iphoneos
+          rm -rf build/ios/iphoneos/Runner.app
+          cp -R "$APP" build/ios/iphoneos/Runner.app
 
       - name: Pack unsigned IPA
         run: |
-          set -e
+          set -euo pipefail
           APP="build/ios/iphoneos/Runner.app"
           test -d "$APP"
           STAGE="$(mktemp -d)"
