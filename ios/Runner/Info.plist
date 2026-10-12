@@ -83,18 +83,24 @@
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>
 	<string>Main</string>
+	<!-- 对照拟沧澜：仅竖屏 + 全屏，避免游戏内点输入框被系统拉成横屏无法输入 -->
+	<key>UIRequiresFullScreen</key>
+	<true/>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
-		<string>UIInterfaceOrientationLandscapeLeft</string>
-		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<!-- 相册/相机：保存图片、上传头像（缺声明会被 iOS TCC 直接拒绝） -->
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>用于读取相册图片以便游戏内上传头像或分享</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>用于保存游戏内下载的图片到相册</string>
+	<key>NSCameraUsageDescription</key>
+	<string>用于拍摄上传图片</string>
+	<!-- 拟沧澜无 iPad 横屏白名单；保持与 iPhone 一致仅竖屏 -->
 	<key>UISupportedInterfaceOrientations~ipad</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
-		<string>UIInterfaceOrientationPortraitUpsideDown</string>
-		<string>UIInterfaceOrientationLandscapeLeft</string>
-		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
 </dict>
 </plist>

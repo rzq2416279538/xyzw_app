@@ -15,6 +15,7 @@ import '../core/game_prefs_store.dart';
 import '../core/inject_scripts.dart';
 import '../core/ios_bg_keep.dart';
 import '../core/local_http_server.dart';
+import '../core/media_bridge.dart';
 import '../core/renderer_status.dart';
 import '../core/script_cache.dart';
 import '../data/account.dart';
@@ -98,6 +99,12 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
     _activeId = widget.initialAccountId;
     widget.scripts.addListener(_onScripts);
     _armSessionHeartbeat();
+    // 进入游戏页再次锁竖屏（对照拟沧澜；防系统/键盘把 WebView 拉横）
+    unawaited(
+      SystemChrome.setPreferredOrientations(const [
+        DeviceOrientation.portraitUp,
+      ]),
+    );
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     SystemChrome.setSystemUIOverlayStyle(
       const SystemUiOverlayStyle(
@@ -962,6 +969,10 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
         }
         return;
       }
+      if (type == 'media') {
+        unawaited(_handleMedia(accountId, map));
+        return;
+      }
       if (type == 'role') {
         final rid = (map['roleId'] as num?)?.toInt() ?? 0;
         final name = (map['name'] as String?)?.trim() ?? '';
@@ -1019,6 +1030,83 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
       );
     } catch (e) {
       AppLog.w('avatar', 'bridge parse fail: $e raw=$raw');
+    }
+  }
+
+  /// 从 WebView 暂存分片读取 base64（避免单次 ReturningResult 过大）。
+  Future<String> _readMediaPayload(WebViewController ctrl, String reqId) async {
+    final idLit = jsonEncode(reqId);
+    final lenRaw = await ctrl.runJavaScriptReturningResult(
+      "(window.__xyzwMediaPayload&&window.__xyzwMediaPayload[$idLit]||'').length",
+    );
+    final len = int.tryParse(lenRaw.toString()) ?? 0;
+    if (len <= 0) return '';
+    const chunk = 240000;
+    final buf = StringBuffer();
+    for (var off = 0; off < len; off += chunk) {
+      final end = off + chunk > len ? len : off + chunk;
+      final partRaw = await ctrl.runJavaScriptReturningResult(
+        "(window.__xyzwMediaPayload[$idLit]||'').substring($off,$end)",
+      );
+      var part = partRaw.toString();
+      if (part.startsWith('"') && part.endsWith('"') && part.length >= 2) {
+        try {
+          final decoded = jsonDecode(part);
+          part = decoded is String ? decoded : part.substring(1, part.length - 1);
+        } catch (_) {
+          part = part.substring(1, part.length - 1);
+        }
+      }
+      buf.write(part);
+    }
+    await ctrl.runJavaScript(
+      "try{if(window.__xyzwMediaPayload)delete window.__xyzwMediaPayload[$idLit]}catch(e){}",
+    );
+    return buf.toString();
+  }
+
+  Future<void> _handleMedia(String accountId, Map<String, dynamic> map) async {
+    final action = map['action'] as String? ?? '';
+    final reqId = map['id'] as String? ?? '';
+    if (reqId.isEmpty) return;
+    AppLog.diag('media', {
+      'event': action,
+      'accountId': accountId,
+      'id': reqId,
+    });
+    Map<String, dynamic> result;
+    try {
+      if (action == 'chooseImage') {
+        final rawSize = map['imageSize'];
+        List<num>? sizes;
+        if (rawSize is List) {
+          sizes = rawSize.whereType<num>().toList();
+        }
+        result = await MediaBridge.chooseImage(imageSize: sizes);
+      } else if (action == 'saveImage') {
+        // 大图 base64 不走 JSChannel；从页面暂存分片回读
+        var b64 = map['base64'] as String? ?? '';
+        final ctrl = _sessions[accountId]?.controller;
+        if (b64.isEmpty && ctrl != null) {
+          try {
+            b64 = await _readMediaPayload(ctrl, reqId);
+          } catch (e) {
+            AppLog.w('media', '取 saveImage payload 失败: $e');
+          }
+        }
+        result = await MediaBridge.saveImage(b64);
+      } else {
+        result = {'errCode': -1, 'errMsg': 'unknown action $action'};
+      }
+    } catch (e) {
+      result = {'errCode': -1, 'errMsg': e.toString()};
+    }
+    final session = _sessions[accountId];
+    if (session == null) return;
+    try {
+      await session.controller.runJavaScript(MediaBridge.jsResolve(reqId, result));
+    } catch (e) {
+      AppLog.w('media', '回传 JS 失败: $e');
     }
   }
 

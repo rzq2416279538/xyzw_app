@@ -1659,6 +1659,87 @@
   };
   TGAMock.tga = TGAMock;
 
+  // ==========================================================================
+  // 相册：chooseImage / saveImage（须在「完善 window.HSDK」之前挂到 HSDK 上，
+  // 才能进入 functionNames / _mockFns 保护，避免 turnpass 盖成空实现）
+  // PlatformH5：i.chooseImage(cb,{imageSize}) / i.saveImage(cb,{base64})
+  // ==========================================================================
+  window.__xyzwMediaCb = window.__xyzwMediaCb || {};
+  window.__xyzwMediaPayload = window.__xyzwMediaPayload || {};
+  window.__xyzwMediaDone = function (id, result) {
+    try {
+      var cb = window.__xyzwMediaCb[id];
+      delete window.__xyzwMediaCb[id];
+      if (typeof cb === "function") cb(result || { errCode: -1 });
+    } catch (e) {
+      console.warn("[HSDK-Mock] mediaDone", e);
+    }
+  };
+  function postMedia(action, id, extra) {
+    try {
+      if (window.XyzwBridge && window.XyzwBridge.postMessage) {
+        var payload = { type: "media", action: action, id: String(id) };
+        if (extra) {
+          for (var k in extra) {
+            if (Object.prototype.hasOwnProperty.call(extra, k)) {
+              payload[k] = extra[k];
+            }
+          }
+        }
+        window.XyzwBridge.postMessage(JSON.stringify(payload));
+        return true;
+      }
+    } catch (e) {}
+    return false;
+  }
+  function xyzwChooseImage(callback, options) {
+    var id = "c" + Date.now() + "_" + Math.floor(Math.random() * 1e6);
+    window.__xyzwMediaCb[id] =
+      typeof callback === "function" ? callback : function () {};
+    var imageSize =
+      options && options.imageSize != null
+        ? options.imageSize
+        : typeof callback !== "function" && callback
+          ? callback
+          : null;
+    if (typeof callback !== "function" && options == null && callback) {
+      imageSize = callback.imageSize || callback;
+    }
+    console.warn("[HSDK-Mock] chooseImage", id, imageSize);
+    if (
+      !postMedia("chooseImage", id, {
+        imageSize: imageSize || [512, 512],
+      })
+    ) {
+      window.__xyzwMediaDone(id, {
+        errCode: -1,
+        errMsg: "no bridge",
+        base64s: [],
+      });
+    }
+  }
+  xyzwChooseImage.__xyzwMedia = true;
+  function xyzwSaveImage(callback, options) {
+    var id = "s" + Date.now() + "_" + Math.floor(Math.random() * 1e6);
+    window.__xyzwMediaCb[id] =
+      typeof callback === "function" ? callback : function () {};
+    var base64 = "";
+    if (options && options.base64 != null) base64 = String(options.base64);
+    else if (callback && typeof callback === "object" && callback.base64 != null) {
+      base64 = String(callback.base64);
+    }
+    // 大图不塞进 JSChannel，暂存后由 Flutter 回读
+    window.__xyzwMediaPayload[id] = base64;
+    console.warn("[HSDK-Mock] saveImage", id, "len=" + base64.length);
+    if (!postMedia("saveImage", id, { hasPayload: true })) {
+      delete window.__xyzwMediaPayload[id];
+      window.__xyzwMediaDone(id, { errCode: -1, errMsg: "no bridge" });
+    }
+  }
+  xyzwSaveImage.__xyzwMedia = true;
+  HSDK.chooseImage = xyzwChooseImage;
+  HSDK.saveImage = xyzwSaveImage;
+
   // ==================== 完善 window.HSDK ====================
   // 直接增强现有的 window.HSDK 对象（由 patch.js 创建），而不是替换它。
   // 这样可以确保任何早期缓存的 HSDK 引用也能获取到新方法。
@@ -1710,6 +1791,9 @@
       "trackEvent",
       "_fetchCryptRule",
       "_loginCheck",
+      // 相册：PlatformH5 → i.chooseImage / i.saveImage（须纳入保护，防 turnpass 盖掉）
+      "chooseImage",
+      "saveImage",
     ];
 
     for (var i = 0; i < functionNames.length; i++) {
@@ -1947,6 +2031,27 @@
   bindSetVibrate(window.HSDK);
   bindSetVibrate(window.wx);
 
+  // 相册 API：再钉到 HSDK / wx / __HORTOR_SDK__（PlatformH5 抓的是后者）
+  function bindMediaApis(target) {
+    if (!target) return;
+    if (typeof target.chooseImage !== "function" || !target.chooseImage.__xyzwMedia) {
+      target.chooseImage = xyzwChooseImage;
+    }
+    if (typeof target.saveImage !== "function" || !target.saveImage.__xyzwMedia) {
+      target.saveImage = xyzwSaveImage;
+    }
+  }
+  function rebindMediaAll() {
+    bindMediaApis(window.HSDK);
+    bindMediaApis(window.wx);
+    bindMediaApis(window.__HORTOR_SDK__);
+  }
+  // 注意：__HORTOR_SDK__ 赋值在下文；此处先钉 HSDK，稍后与定时器再钉别名
+  rebindMediaAll();
+  setTimeout(rebindMediaAll, 0);
+  setTimeout(rebindMediaAll, 1500);
+  setTimeout(rebindMediaAll, 5000);
+
   // HSDK 标志位与常量
   var hsdk = window.HSDK || {};
   hsdk.isMT = false;
@@ -1974,6 +2079,7 @@
   }
   window.TGA = TGAMock;
   bindSetClipboard(window.__HORTOR_SDK__);
+  rebindMediaAll();
 
   /**
    * 发送 SDK 就绪信号，通知游戏加载器继续执行。

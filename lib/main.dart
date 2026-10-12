@@ -16,6 +16,10 @@ Future<void> main() async {
 
   await AppLog.ensureBootHeader(appVersion: '1.0.0+1');
 
+  // 对照拟沧澜：整 App 锁定竖屏，防止 WebView 输入框触发横屏
+  await SystemChrome.setPreferredOrientations(const [
+    DeviceOrientation.portraitUp,
+  ]);
   SystemChrome.setSystemUIOverlayStyle(
     const SystemUiOverlayStyle(
       statusBarColor: Colors.transparent,
