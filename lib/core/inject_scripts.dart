@@ -2181,17 +2181,17 @@ try {
 })();
 ''';
 
-  /// 输入法：游戏画面不动；把系统 input 钉在键盘上方白条，右侧「完成」。
-  /// （对照拟沧澜：不顶移 WebView，避免白屏）
+  /// 输入法：游戏画面不动；把系统 input 挂进键盘上方白条（可点「完成」）。
   static const imeBridge = r'''
 (function(){
-  if (window.__xyzwImeBridgeV1) return;
-  window.__xyzwImeBridgeV1 = true;
+  if (window.__xyzwImeBridgeV2) return;
+  window.__xyzwImeBridgeV2 = true;
   var bar = null;
   var doneBtn = null;
   var activeEl = null;
   var saved = null;
   var pinTimer = null;
+  var committing = false;
 
   function pinScroll(){
     try {
@@ -2199,6 +2199,29 @@ try {
       if (document.documentElement) document.documentElement.scrollTop = 0;
       if (document.body) document.body.scrollTop = 0;
     } catch (e0) {}
+  }
+
+  function commit(){
+    if (committing) return;
+    committing = true;
+    var el = activeEl;
+    console.warn('[咸强之王][media] ime commit', el && (el.value || '').slice(0, 40));
+    try {
+      if (el) {
+        try {
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        } catch (e1) {}
+        try {
+          el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+          el.dispatchEvent(new KeyboardEvent('keypress', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+          el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+        } catch (e2) {}
+        try { el.blur(); } catch (e3) {}
+      }
+    } finally {
+      setTimeout(function(){ committing = false; }, 120);
+    }
   }
 
   function ensureBar(){
@@ -2210,22 +2233,28 @@ try {
       'position:fixed', 'left:0', 'width:100%', 'height:44px',
       'background:#ffffff', 'z-index:2147483646', 'display:none',
       'box-sizing:border-box', 'border-top:1px solid #d1d1d6',
-      'pointer-events:auto'
+      'pointer-events:auto', 'flex-direction:row', 'align-items:center',
+      'padding:0 0 0 0'
     ].join(';');
     doneBtn = document.createElement('button');
     doneBtn.type = 'button';
+    doneBtn.setAttribute('data-xyzw-ime', '1');
     doneBtn.textContent = '完成';
     doneBtn.style.cssText = [
-      'position:absolute', 'right:8px', 'top:6px', 'height:32px',
-      'padding:0 14px', 'background:#34c759', 'color:#fff', 'border:none',
-      'border-radius:6px', 'font-size:15px', 'font-weight:600', 'z-index:2',
-      'line-height:32px'
+      'flex:0 0 auto', 'position:relative', 'right:auto', 'top:auto',
+      'height:32px', 'margin:0 8px 0 4px', 'padding:0 14px',
+      'background:#34c759', 'color:#fff', 'border:none',
+      'border-radius:6px', 'font-size:15px', 'font-weight:600',
+      'line-height:32px', 'z-index:3', '-webkit-appearance:none'
     ].join(';');
-    doneBtn.addEventListener('touchstart', function(e){ e.preventDefault(); }, {passive:false});
-    doneBtn.addEventListener('mousedown', function(e){ e.preventDefault(); });
-    doneBtn.addEventListener('click', function(){
-      try { if (activeEl) activeEl.blur(); } catch (e1) {}
-    });
+    // iOS：用 touchend 提交，避免 input 盖住按钮或 click 丢事件
+    function onDone(e){
+      try { e.preventDefault(); e.stopPropagation(); } catch (e4) {}
+      commit();
+    }
+    doneBtn.addEventListener('touchend', onDone, {passive:false});
+    doneBtn.addEventListener('mouseup', onDone);
+    doneBtn.addEventListener('click', onDone);
     bar.appendChild(doneBtn);
     (document.documentElement || document.body).appendChild(bar);
     return bar;
@@ -2237,39 +2266,56 @@ try {
     return Math.max(0, (window.innerHeight || 0) - 44);
   }
 
+  function styleInput(el){
+    var s = el.style;
+    // Cocos 常把文字设成 transparent / opacity:0，这里每帧钉死可见样式
+    s.setProperty('position', 'relative', 'important');
+    s.setProperty('top', 'auto', 'important');
+    s.setProperty('left', 'auto', 'important');
+    s.setProperty('right', 'auto', 'important');
+    s.setProperty('bottom', 'auto', 'important');
+    s.setProperty('flex', '1 1 auto', 'important');
+    s.setProperty('width', '100%', 'important');
+    s.setProperty('max-width', 'none', 'important');
+    s.setProperty('height', '44px', 'important');
+    s.setProperty('min-height', '44px', 'important');
+    s.setProperty('z-index', '1', 'important');
+    s.setProperty('opacity', '1', 'important');
+    s.setProperty('font-size', '16px', 'important');
+    s.setProperty('line-height', '44px', 'important');
+    s.setProperty('background', '#ffffff', 'important');
+    s.setProperty('background-color', '#ffffff', 'important');
+    s.setProperty('color', '#000000', 'important');
+    s.setProperty('-webkit-text-fill-color', '#000000', 'important');
+    s.setProperty('caret-color', '#007aff', 'important');
+    s.setProperty('border', 'none', 'important');
+    s.setProperty('border-radius', '0', 'important');
+    s.setProperty('padding', '0 12px', 'important');
+    s.setProperty('margin', '0', 'important');
+    s.setProperty('transform', 'none', 'important');
+    s.setProperty('-webkit-transform', 'none', 'important');
+    s.setProperty('box-shadow', 'none', 'important');
+    s.setProperty('outline', 'none', 'important');
+    s.setProperty('display', 'block', 'important');
+    s.setProperty('visibility', 'visible', 'important');
+    s.setProperty('pointer-events', 'auto', 'important');
+    try { el.removeAttribute('readonly'); } catch (e5) {}
+  }
+
   function place(){
     if (!activeEl) return;
     ensureBar();
     var top = barTop();
-    bar.style.display = 'block';
+    bar.style.display = 'flex';
     bar.style.top = top + 'px';
     bar.style.bottom = 'auto';
-    try {
-      var s = activeEl.style;
-      s.setProperty('position', 'fixed', 'important');
-      s.setProperty('top', top + 'px', 'important');
-      s.setProperty('left', '0px', 'important');
-      s.setProperty('right', '72px', 'important');
-      s.setProperty('width', 'auto', 'important');
-      s.setProperty('max-width', 'none', 'important');
-      s.setProperty('height', '44px', 'important');
-      s.setProperty('min-height', '44px', 'important');
-      s.setProperty('z-index', '2147483647', 'important');
-      s.setProperty('opacity', '1', 'important');
-      s.setProperty('font-size', '16px', 'important');
-      s.setProperty('line-height', '44px', 'important');
-      s.setProperty('background', '#ffffff', 'important');
-      s.setProperty('color', '#000000', 'important');
-      s.setProperty('border', 'none', 'important');
-      s.setProperty('border-radius', '0', 'important');
-      s.setProperty('padding', '0 12px', 'important');
-      s.setProperty('margin', '0', 'important');
-      s.setProperty('transform', 'none', 'important');
-      s.setProperty('-webkit-transform', 'none', 'important');
-      s.setProperty('box-shadow', 'none', 'important');
-      s.setProperty('outline', 'none', 'important');
-      s.setProperty('caret-color', '#007aff', 'important');
-    } catch (e2) {}
+    // 保证 input 在按钮左侧
+    if (activeEl.parentNode !== bar) {
+      bar.insertBefore(activeEl, doneBtn);
+    } else if (doneBtn && activeEl.nextSibling !== doneBtn) {
+      bar.insertBefore(activeEl, doneBtn);
+    }
+    styleInput(activeEl);
     pinScroll();
   }
 
@@ -2289,24 +2335,42 @@ try {
     detach(false);
     activeEl = el;
     saved = {
-      cssText: el.style.cssText,
-      className: el.className
+      parent: el.parentNode,
+      next: el.nextSibling,
+      cssText: el.style.cssText
     };
     ensureBar();
+    try { bar.insertBefore(el, doneBtn); } catch (e6) {}
     place();
+    try { el.focus(); } catch (e7) {}
     if (pinTimer) clearInterval(pinTimer);
-    pinTimer = setInterval(place, 100);
-    console.warn('[咸强之王][media] ime attach', el.tagName, el.type || '');
+    pinTimer = setInterval(place, 80);
+    console.warn('[咸强之王][media] ime attach v2', el.tagName, el.type || '', 'valLen=' + String(el.value || '').length);
+  }
+
+  function restoreEl(el, info){
+    if (!el || !info) return;
+    try {
+      if (info.parent) {
+        if (info.next && info.next.parentNode === info.parent) {
+          info.parent.insertBefore(el, info.next);
+        } else {
+          info.parent.appendChild(el);
+        }
+      }
+    } catch (e8) {}
+    try { el.style.cssText = info.cssText || ''; } catch (e9) {}
   }
 
   function detach(restore){
     if (pinTimer) { clearInterval(pinTimer); pinTimer = null; }
     if (bar) bar.style.display = 'none';
-    if (activeEl && restore && saved) {
-      try { activeEl.style.cssText = saved.cssText || ''; } catch (e3) {}
-    }
+    var el = activeEl;
+    var info = saved;
     activeEl = null;
     saved = null;
+    if (el && restore) restoreEl(el, info);
+    else if (el && info) restoreEl(el, info);
   }
 
   document.addEventListener('focusin', function(e){
@@ -2319,9 +2383,11 @@ try {
     var el = e.target;
     if (el !== activeEl) return;
     setTimeout(function(){
+      if (committing) return;
       if (document.activeElement === activeEl) return;
+      // 点完成/键盘勾 都会走到失焦
       detach(true);
-    }, 60);
+    }, 80);
   }, true);
 
   document.addEventListener('scroll', function(){
@@ -2334,7 +2400,7 @@ try {
   }
   window.addEventListener('resize', function(){ if (activeEl) place(); });
 
-  console.log('[咸强之王][media] imeBridge v1 on');
+  console.log('[咸强之王][media] imeBridge v2 on');
 })();
 ''';
 
