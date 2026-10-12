@@ -2046,6 +2046,191 @@ try {
 })();
 ''';
 
+  /// 强制竖屏：键盘弹出后 innerHeight 变矮，Cocos 会误判横屏并旋转画布。
+  static const portraitLock = r'''
+(function(){
+  if (window.__xyzwPortraitLock) return;
+  window.__xyzwPortraitLock = true;
+  function forcePortrait(){
+    try {
+      if (window.screen && screen.orientation && screen.orientation.lock) {
+        screen.orientation.lock('portrait').catch(function(){});
+      }
+    } catch (e0) {}
+    try {
+      if (typeof cc !== 'undefined' && cc.view && cc.macro) {
+        cc.view.setOrientation(cc.macro.ORIENTATION_PORTRAIT);
+        if (typeof cc.view._orientation !== 'undefined') {
+          cc.view._orientation = cc.macro.ORIENTATION_PORTRAIT;
+        }
+      }
+    } catch (e1) {}
+    try {
+      var canvas = document.getElementById('GameCanvas');
+      if (canvas && canvas.style) {
+        var t = canvas.style.transform || '';
+        if (/rotate\s*\(\s*90deg\s*\)/i.test(t) || /rotate\s*\(\s*-90deg\s*\)/i.test(t)) {
+          canvas.style.transform = t.replace(/rotate\s*\(\s*-?90deg\s*\)/ig, 'rotate(0deg)');
+        }
+      }
+      var body = document.body;
+      if (body && body.style && /rotate\s*\(\s*-?90deg\s*\)/i.test(body.style.transform || '')) {
+        body.style.transform = 'none';
+      }
+    } catch (e2) {}
+  }
+  forcePortrait();
+  window.addEventListener('resize', forcePortrait, true);
+  window.addEventListener('orientationchange', forcePortrait, true);
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', forcePortrait);
+  }
+  var n = 0;
+  var iv = setInterval(function(){
+    forcePortrait();
+    if (++n > 40) clearInterval(iv);
+  }, 500);
+  console.log('[咸强之王][media] portraitLock on');
+})();
+''';
+
+  /// 相册能力：直接补丁 PlatformManager / HSDK，不依赖 renderer 缓存里的旧 hsdk-mock。
+  /// PlatformH5：chooseImage([512,98]) / saveImage({imagePath:dataUrl})
+  static const mediaBridge = r'''
+(function(){
+  if (window.__xyzwMediaBridgePatch) return;
+  window.__xyzwMediaBridgePatch = true;
+  window.__xyzwMediaCb = window.__xyzwMediaCb || {};
+  window.__xyzwMediaPayload = window.__xyzwMediaPayload || {};
+  window.__xyzwMediaDone = function(id, result){
+    try {
+      var cb = window.__xyzwMediaCb[id];
+      delete window.__xyzwMediaCb[id];
+      if (typeof cb === 'function') cb(result || { errCode: -1, base64s: [] });
+    } catch (e) {
+      console.warn('[咸强之王][media] mediaDone', e);
+    }
+  };
+  function postMedia(action, id, extra){
+    try {
+      if (window.XyzwBridge && window.XyzwBridge.postMessage) {
+        var payload = { type: 'media', action: action, id: String(id) };
+        if (extra) {
+          for (var k in extra) {
+            if (Object.prototype.hasOwnProperty.call(extra, k)) payload[k] = extra[k];
+          }
+        }
+        window.XyzwBridge.postMessage(JSON.stringify(payload));
+        return true;
+      }
+    } catch (e) {}
+    return false;
+  }
+  function chooseImagePromise(imageSize){
+    return new Promise(function(resolve){
+      var id = 'c' + Date.now() + '_' + Math.floor(Math.random() * 1e6);
+      window.__xyzwMediaCb[id] = function(r){
+        resolve(r || { errCode: -1, base64s: [] });
+      };
+      console.warn('[咸强之王][media] chooseImage', id, imageSize);
+      if (!postMedia('chooseImage', id, { imageSize: imageSize || [512, 512] })) {
+        window.__xyzwMediaDone(id, { errCode: -1, errMsg: 'no bridge', base64s: [] });
+      }
+    });
+  }
+  function saveImagePromise(opts){
+    return new Promise(function(resolve, reject){
+      var id = 's' + Date.now() + '_' + Math.floor(Math.random() * 1e6);
+      var base64 = '';
+      if (opts && opts.base64 != null) base64 = String(opts.base64);
+      else if (opts && opts.imagePath != null) {
+        base64 = String(opts.imagePath)
+          .replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/, '');
+      }
+      window.__xyzwMediaPayload[id] = base64;
+      window.__xyzwMediaCb[id] = function(r){
+        if (r && r.errCode === 0) resolve(r);
+        else reject(r || { errCode: -1, errMsg: 'save fail' });
+      };
+      console.warn('[咸强之王][media] saveImage', id, 'len=' + base64.length);
+      if (!postMedia('saveImage', id, { hasPayload: true })) {
+        delete window.__xyzwMediaPayload[id];
+        window.__xyzwMediaDone(id, { errCode: -1, errMsg: 'no bridge' });
+      }
+    });
+  }
+  function hsdkChooseImage(callback, options){
+    var imageSize = null;
+    if (options && options.imageSize != null) imageSize = options.imageSize;
+    else if (typeof callback !== 'function' && callback) imageSize = callback.imageSize || callback;
+    chooseImagePromise(imageSize).then(function(r){
+      if (typeof callback === 'function') callback(r);
+    });
+  }
+  function hsdkSaveImage(callback, options){
+    var opts = options;
+    if ((!opts || opts.base64 == null) && callback && typeof callback === 'object') opts = callback;
+    saveImagePromise(opts || {}).then(function(r){
+      if (typeof callback === 'function') callback(r);
+    }).catch(function(r){
+      if (typeof callback === 'function') callback(r);
+    });
+  }
+  hsdkChooseImage.__xyzwMedia = true;
+  hsdkSaveImage.__xyzwMedia = true;
+  function tryRequire(name){
+    try {
+      if (typeof window.__require === 'function') return window.__require(name);
+    } catch (e) {}
+    return null;
+  }
+  function patchHsdk(){
+    try {
+      var targets = [window.HSDK, window.__HORTOR_SDK__, window.wx];
+      for (var i = 0; i < targets.length; i++) {
+        var t = targets[i];
+        if (!t) continue;
+        t.chooseImage = hsdkChooseImage;
+        t.saveImage = hsdkSaveImage;
+      }
+    } catch (e) {}
+  }
+  function patchPlatform(){
+    try {
+      var PM = tryRequire('PlatformManager');
+      var inst = PM && (PM.PlatformManager && PM.PlatformManager.instance || PM.instance);
+      if (!inst) return false;
+      inst.chooseImage = function(e){ return chooseImagePromise(e); };
+      inst.saveImage = function(e){ return saveImagePromise(e); };
+      if (inst._platform) {
+        inst._platform.chooseImage = function(e){ return chooseImagePromise(e); };
+        inst._platform.saveImage = function(e){ return saveImagePromise(e); };
+      }
+      if (!window.__xyzwMediaPlatLogged) {
+        window.__xyzwMediaPlatLogged = true;
+        var name = '';
+        try { name = inst._platform && (inst._platform.platformName || inst._platform.constructor && inst._platform.constructor.name) || ''; } catch (e2) {}
+        console.warn('[咸强之王][media] PlatformManager patched', name, 'isH5=' + !!inst.isH5);
+      }
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+  function tick(){
+    patchHsdk();
+    patchPlatform();
+  }
+  tick();
+  var n = 0;
+  var iv = setInterval(function(){
+    tick();
+    if (++n > 60) clearInterval(iv);
+  }, 500);
+  console.warn('[咸强之王][media] bridge patch installed');
+})();
+''';
+
   static String _jsStr(String s) =>
       "'${s.replaceAll(r'\', r'\\').replaceAll("'", r"\'").replaceAll('\r', '').replaceAll('\n', r'\n')}'";
 

@@ -24,14 +24,16 @@ class MediaBridge {
       final maxH = (imageSize != null && imageSize.length > 1)
           ? imageSize[1].toDouble()
           : maxW;
-      // 98 这类小数当高度不合理时，按宽度等比
-      final useH = maxH >= 64 ? maxH : maxW;
+      // 游戏常传 [512,98]：第二维过扁时按正方形边长处理，避免压成细条
+      final useH =
+          (maxH >= 64 && maxH >= maxW * 0.35) ? maxH : maxW;
 
       final file = await _picker.pickImage(
         source: ImageSource.gallery,
         maxWidth: maxW.clamp(64, 4096),
         maxHeight: useH.clamp(64, 4096),
         imageQuality: 92,
+        requestFullMetadata: false,
       );
       if (file == null) {
         AppLog.i('media', 'chooseImage 用户取消');
@@ -83,26 +85,35 @@ class MediaBridge {
         return {'errCode': -1, 'errMsg': 'decode empty'};
       }
 
-      final hasAccess = await Gal.hasAccess(toAlbum: true);
+      // 仅「写入相册」权限即可；toAlbum:true 在 Limited 权限下容易假成功/写不到「最近项目」
+      final hasAccess = await Gal.hasAccess();
       if (!hasAccess) {
-        final ok = await Gal.requestAccess(toAlbum: true);
+        final ok = await Gal.requestAccess();
         if (!ok) {
           AppLog.w('media', 'saveImage 无相册权限');
           return {'errCode': -2, 'errMsg': 'no album permission'};
         }
       }
 
-      // gal 在部分机型对 bytes 扩展名敏感，先落临时文件再入库更稳
-      final dir = await getTemporaryDirectory();
-      final isJpeg = bytes.length > 2 && bytes[0] == 0xFF && bytes[1] == 0xD8;
-      final path =
-          '${dir.path}${Platform.pathSeparator}xyzw_save_${DateTime.now().millisecondsSinceEpoch}.${isJpeg ? 'jpg' : 'png'}';
-      final file = File(path);
-      await file.writeAsBytes(bytes, flush: true);
-      await Gal.putImage(path);
+      final name =
+          'xyzw_${DateTime.now().millisecondsSinceEpoch}';
+      // 优先 bytes API（少一层临时文件）；失败再落盘重试
       try {
-        await file.delete();
-      } catch (_) {}
+        await Gal.putImageBytes(bytes, name: name);
+      } catch (e1) {
+        AppLog.w('media', 'putImageBytes 失败，改走文件: $e1');
+        final dir = await getTemporaryDirectory();
+        final isJpeg =
+            bytes.length > 2 && bytes[0] == 0xFF && bytes[1] == 0xD8;
+        final path =
+            '${dir.path}${Platform.pathSeparator}$name.${isJpeg ? 'jpg' : 'png'}';
+        final file = File(path);
+        await file.writeAsBytes(bytes, flush: true);
+        await Gal.putImage(path);
+        try {
+          await file.delete();
+        } catch (_) {}
+      }
       AppLog.i('media', 'saveImage ok bytes=${bytes.length}');
       return {'errCode': 0, 'errMsg': 'saveImage:ok'};
     } catch (e) {

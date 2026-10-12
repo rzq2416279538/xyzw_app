@@ -577,6 +577,8 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
               await _queueInject(accountId, controller, account, 'page_finished');
               await controller.runJavaScript(
                 '${InjectScripts.vhFix}\n${InjectScripts.canvasGuard}\n'
+                '${InjectScripts.portraitLock}\n'
+                '${InjectScripts.mediaBridge}\n'
                 '${InjectScripts.visibilityKeepAlive}\n'
                 '${InjectScripts.appLifecycleBridge}\n'
                 '${InjectScripts.clientAnomalyWatch}\n'
@@ -820,6 +822,8 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
     final prefs = GamePrefsStore.data;
     await controller.runJavaScript(
       '${InjectScripts.compat}\n${InjectScripts.xhrIntercept}\n'
+      '${InjectScripts.portraitLock}\n'
+      '${InjectScripts.mediaBridge}\n'
       '${InjectScripts.visibilityKeepAlive}\n'
       '${InjectScripts.appLifecycleBridge}\n'
       '${InjectScripts.clientAnomalyWatch}\n'
