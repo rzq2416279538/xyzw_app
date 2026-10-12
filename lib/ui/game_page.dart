@@ -603,6 +603,7 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
               await controller.runJavaScript(
                 '${InjectScripts.vhFix}\n${InjectScripts.canvasGuard}\n'
                 '${InjectScripts.portraitLock}\n'
+                '${InjectScripts.imeBridge}\n'
                 '${InjectScripts.mediaBridge}\n'
                 '${InjectScripts.visibilityKeepAlive}\n'
                 '${InjectScripts.appLifecycleBridge}\n'
@@ -848,6 +849,7 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
     await controller.runJavaScript(
       '${InjectScripts.compat}\n${InjectScripts.xhrIntercept}\n'
       '${InjectScripts.portraitLock}\n'
+      '${InjectScripts.imeBridge}\n'
       '${InjectScripts.mediaBridge}\n'
       '${InjectScripts.visibilityKeepAlive}\n'
       '${InjectScripts.appLifecycleBridge}\n'
@@ -1370,14 +1372,7 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
     final active = widget.store.byId(_activeId);
     final title = active?.displayName ?? '咸强之王';
 
-    // 不压缩 WebView（避免横屏）。键盘弹出时按「真实键盘高度」上移游戏区。
-    // WKWebView 下 viewInsets.bottom 偶发接近全屏，必须封顶，否则会整页顶飞只剩白屏。
-    final media = MediaQuery.of(context);
-    final rawInset = media.viewInsets.bottom;
-    final maxKeyboard = media.size.height * 0.34; // 约屏高 1/3
-    final keyboardShift =
-        rawInset <= 0 ? 0.0 : rawInset.clamp(0.0, maxKeyboard);
-
+    // 键盘浮在游戏上：不压缩、不上移 WebView（由 imeBridge 把输入条钉在键盘上方）
     return Scaffold(
       resizeToAvoidBottomInset: false,
       backgroundColor: const Color(0xFFF2F2F7),
@@ -1448,25 +1443,7 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
                 ),
               ),
             ),
-          Expanded(
-            child: ColoredBox(
-              color: Colors.black,
-              child: ClipRect(
-                child: TweenAnimationBuilder<double>(
-                  tween: Tween<double>(begin: 0, end: keyboardShift),
-                  duration: const Duration(milliseconds: 240),
-                  curve: Curves.easeOutCubic,
-                  builder: (context, value, child) {
-                    return Transform.translate(
-                      offset: Offset(0, -value),
-                      child: child,
-                    );
-                  },
-                  child: _buildBody(),
-                ),
-              ),
-            ),
-          ),
+          Expanded(child: _buildBody()),
         ],
       ),
     );

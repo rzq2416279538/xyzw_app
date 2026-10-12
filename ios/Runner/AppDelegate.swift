@@ -1,6 +1,7 @@
 import Flutter
 import Photos
 import UIKit
+import WebKit
 
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
@@ -11,7 +12,58 @@ import UIKit
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
     // 不再主动 Bonjour 扫描「本地网络设备」；外网权限由 Dart 侧 HTTPS 预检即可。
+    // 键盘弹出时禁止 WKWebView 顶白/滚动挤压（游戏画面保持不动）
+    let center = NotificationCenter.default
+    center.addObserver(
+      self,
+      selector: #selector(onKeyboardAffectWebView),
+      name: UIResponder.keyboardWillChangeFrameNotification,
+      object: nil
+    )
+    center.addObserver(
+      self,
+      selector: #selector(onKeyboardAffectWebView),
+      name: UIResponder.keyboardWillShowNotification,
+      object: nil
+    )
+    center.addObserver(
+      self,
+      selector: #selector(onKeyboardAffectWebView),
+      name: UIResponder.keyboardDidShowNotification,
+      object: nil
+    )
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+  }
+
+  @objc private func onKeyboardAffectWebView() {
+    guard let root = window ?? UIApplication.shared.connectedScenes
+      .compactMap({ $0 as? UIWindowScene })
+      .flatMap({ $0.windows })
+      .first(where: { $0.isKeyWindow })
+    else { return }
+    hardenWebViews(in: root)
+  }
+
+  /// 关掉 WKWebView 随键盘调整 inset / 滚动，避免大块白屏。
+  private func hardenWebViews(in view: UIView) {
+    if let web = view as? WKWebView {
+      let scroll = web.scrollView
+      scroll.isScrollEnabled = false
+      scroll.bounces = false
+      scroll.alwaysBounceVertical = false
+      scroll.keyboardDismissMode = .none
+      if #available(iOS 11.0, *) {
+        scroll.contentInsetAdjustmentBehavior = .never
+      }
+      scroll.contentInset = .zero
+      scroll.scrollIndicatorInsets = .zero
+      if scroll.contentOffset != .zero {
+        scroll.setContentOffset(.zero, animated: false)
+      }
+    }
+    for child in view.subviews {
+      hardenWebViews(in: child)
+    }
   }
 
   /// 对照拟沧澜：整 App 仅竖屏。键盘弹出时系统/WebView 也不得切横屏。

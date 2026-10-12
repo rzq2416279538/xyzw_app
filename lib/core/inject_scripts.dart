@@ -2181,6 +2181,163 @@ try {
 })();
 ''';
 
+  /// 输入法：游戏画面不动；把系统 input 钉在键盘上方白条，右侧「完成」。
+  /// （对照拟沧澜：不顶移 WebView，避免白屏）
+  static const imeBridge = r'''
+(function(){
+  if (window.__xyzwImeBridgeV1) return;
+  window.__xyzwImeBridgeV1 = true;
+  var bar = null;
+  var doneBtn = null;
+  var activeEl = null;
+  var saved = null;
+  var pinTimer = null;
+
+  function pinScroll(){
+    try {
+      if (window.scrollTo) window.scrollTo(0, 0);
+      if (document.documentElement) document.documentElement.scrollTop = 0;
+      if (document.body) document.body.scrollTop = 0;
+    } catch (e0) {}
+  }
+
+  function ensureBar(){
+    if (bar && bar.parentNode) return bar;
+    bar = document.createElement('div');
+    bar.id = '__xyzwImeBar';
+    bar.setAttribute('data-xyzw-ime', '1');
+    bar.style.cssText = [
+      'position:fixed', 'left:0', 'width:100%', 'height:44px',
+      'background:#ffffff', 'z-index:2147483646', 'display:none',
+      'box-sizing:border-box', 'border-top:1px solid #d1d1d6',
+      'pointer-events:auto'
+    ].join(';');
+    doneBtn = document.createElement('button');
+    doneBtn.type = 'button';
+    doneBtn.textContent = '完成';
+    doneBtn.style.cssText = [
+      'position:absolute', 'right:8px', 'top:6px', 'height:32px',
+      'padding:0 14px', 'background:#34c759', 'color:#fff', 'border:none',
+      'border-radius:6px', 'font-size:15px', 'font-weight:600', 'z-index:2',
+      'line-height:32px'
+    ].join(';');
+    doneBtn.addEventListener('touchstart', function(e){ e.preventDefault(); }, {passive:false});
+    doneBtn.addEventListener('mousedown', function(e){ e.preventDefault(); });
+    doneBtn.addEventListener('click', function(){
+      try { if (activeEl) activeEl.blur(); } catch (e1) {}
+    });
+    bar.appendChild(doneBtn);
+    (document.documentElement || document.body).appendChild(bar);
+    return bar;
+  }
+
+  function barTop(){
+    var vv = window.visualViewport;
+    if (vv && vv.height > 0) return Math.max(0, vv.offsetTop + vv.height - 44);
+    return Math.max(0, (window.innerHeight || 0) - 44);
+  }
+
+  function place(){
+    if (!activeEl) return;
+    ensureBar();
+    var top = barTop();
+    bar.style.display = 'block';
+    bar.style.top = top + 'px';
+    bar.style.bottom = 'auto';
+    try {
+      var s = activeEl.style;
+      s.setProperty('position', 'fixed', 'important');
+      s.setProperty('top', top + 'px', 'important');
+      s.setProperty('left', '0px', 'important');
+      s.setProperty('right', '72px', 'important');
+      s.setProperty('width', 'auto', 'important');
+      s.setProperty('max-width', 'none', 'important');
+      s.setProperty('height', '44px', 'important');
+      s.setProperty('min-height', '44px', 'important');
+      s.setProperty('z-index', '2147483647', 'important');
+      s.setProperty('opacity', '1', 'important');
+      s.setProperty('font-size', '16px', 'important');
+      s.setProperty('line-height', '44px', 'important');
+      s.setProperty('background', '#ffffff', 'important');
+      s.setProperty('color', '#000000', 'important');
+      s.setProperty('border', 'none', 'important');
+      s.setProperty('border-radius', '0', 'important');
+      s.setProperty('padding', '0 12px', 'important');
+      s.setProperty('margin', '0', 'important');
+      s.setProperty('transform', 'none', 'important');
+      s.setProperty('-webkit-transform', 'none', 'important');
+      s.setProperty('box-shadow', 'none', 'important');
+      s.setProperty('outline', 'none', 'important');
+      s.setProperty('caret-color', '#007aff', 'important');
+    } catch (e2) {}
+    pinScroll();
+  }
+
+  function isEditable(el){
+    if (!el || !el.tagName) return false;
+    if (el.getAttribute && el.getAttribute('data-xyzw-ime') === '1') return false;
+    var tag = el.tagName.toUpperCase();
+    if (tag === 'TEXTAREA') return true;
+    if (tag !== 'INPUT') return false;
+    var type = String(el.type || 'text').toLowerCase();
+    return type === 'text' || type === 'search' || type === 'tel' || type === 'url'
+      || type === 'email' || type === 'password' || type === 'number' || type === '';
+  }
+
+  function attach(el){
+    if (activeEl === el) { place(); return; }
+    detach(false);
+    activeEl = el;
+    saved = {
+      cssText: el.style.cssText,
+      className: el.className
+    };
+    ensureBar();
+    place();
+    if (pinTimer) clearInterval(pinTimer);
+    pinTimer = setInterval(place, 100);
+    console.warn('[咸强之王][media] ime attach', el.tagName, el.type || '');
+  }
+
+  function detach(restore){
+    if (pinTimer) { clearInterval(pinTimer); pinTimer = null; }
+    if (bar) bar.style.display = 'none';
+    if (activeEl && restore && saved) {
+      try { activeEl.style.cssText = saved.cssText || ''; } catch (e3) {}
+    }
+    activeEl = null;
+    saved = null;
+  }
+
+  document.addEventListener('focusin', function(e){
+    var el = e.target;
+    if (!isEditable(el)) return;
+    attach(el);
+  }, true);
+
+  document.addEventListener('focusout', function(e){
+    var el = e.target;
+    if (el !== activeEl) return;
+    setTimeout(function(){
+      if (document.activeElement === activeEl) return;
+      detach(true);
+    }, 60);
+  }, true);
+
+  document.addEventListener('scroll', function(){
+    if (activeEl) pinScroll();
+  }, true);
+
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', function(){ if (activeEl) place(); });
+    window.visualViewport.addEventListener('scroll', function(){ if (activeEl) place(); });
+  }
+  window.addEventListener('resize', function(){ if (activeEl) place(); });
+
+  console.log('[咸强之王][media] imeBridge v1 on');
+})();
+''';
+
   /// 相册/换头像：锁定 HSDK/Platform；补 getClientVersion（否则 200ms 超时→版本太低）。
   static const mediaBridge = r'''
 (function(){
