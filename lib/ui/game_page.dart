@@ -1370,8 +1370,13 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
     final active = widget.store.byId(_activeId);
     final title = active?.displayName ?? '咸强之王';
 
-    // 不压缩 WebView（避免宽>高横屏）；键盘弹出时把游戏整体上移，收起复位
-    final keyboardBottom = MediaQuery.viewInsetsOf(context).bottom;
+    // 不压缩 WebView（避免横屏）。键盘弹出时按「真实键盘高度」上移游戏区。
+    // WKWebView 下 viewInsets.bottom 偶发接近全屏，必须封顶，否则会整页顶飞只剩白屏。
+    final media = MediaQuery.of(context);
+    final rawInset = media.viewInsets.bottom;
+    final maxKeyboard = media.size.height * 0.34; // 约屏高 1/3
+    final keyboardShift =
+        rawInset <= 0 ? 0.0 : rawInset.clamp(0.0, maxKeyboard);
 
     return Scaffold(
       resizeToAvoidBottomInset: false,
@@ -1444,24 +1449,22 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
               ),
             ),
           Expanded(
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                final h = constraints.maxHeight;
-                final dy = (keyboardBottom > 0 && h > 0)
-                    ? -(keyboardBottom / h)
-                    : 0.0;
-                return ColoredBox(
-                  color: Colors.black,
-                  child: ClipRect(
-                    child: AnimatedSlide(
-                      duration: const Duration(milliseconds: 240),
-                      curve: Curves.easeOutCubic,
-                      offset: Offset(0, dy),
-                      child: _buildBody(),
-                    ),
-                  ),
-                );
-              },
+            child: ColoredBox(
+              color: Colors.black,
+              child: ClipRect(
+                child: TweenAnimationBuilder<double>(
+                  tween: Tween<double>(begin: 0, end: keyboardShift),
+                  duration: const Duration(milliseconds: 240),
+                  curve: Curves.easeOutCubic,
+                  builder: (context, value, child) {
+                    return Transform.translate(
+                      offset: Offset(0, -value),
+                      child: child,
+                    );
+                  },
+                  child: _buildBody(),
+                ),
+              ),
             ),
           ),
         ],
