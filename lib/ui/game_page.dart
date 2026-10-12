@@ -1370,8 +1370,10 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
     final active = widget.store.byId(_activeId);
     final title = active?.displayName ?? '咸强之王';
 
+    // 不压缩 WebView（避免宽>高横屏）；键盘弹出时把游戏整体上移，收起复位
+    final keyboardBottom = MediaQuery.viewInsetsOf(context).bottom;
+
     return Scaffold(
-      // 键盘弹出时不压缩 WebView，否则 innerHeight 变矮 → 宽>高 → Cocos 横屏
       resizeToAvoidBottomInset: false,
       backgroundColor: const Color(0xFFF2F2F7),
       body: Column(
@@ -1441,7 +1443,27 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
                 ),
               ),
             ),
-          Expanded(child: _buildBody()),
+          Expanded(
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final h = constraints.maxHeight;
+                final dy = (keyboardBottom > 0 && h > 0)
+                    ? -(keyboardBottom / h)
+                    : 0.0;
+                return ColoredBox(
+                  color: Colors.black,
+                  child: ClipRect(
+                    child: AnimatedSlide(
+                      duration: const Duration(milliseconds: 240),
+                      curve: Curves.easeOutCubic,
+                      offset: Offset(0, dy),
+                      child: _buildBody(),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
         ],
       ),
     );
