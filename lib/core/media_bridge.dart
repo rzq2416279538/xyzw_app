@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:flutter/services.dart';
 import 'package:gal/gal.dart';
@@ -15,26 +16,39 @@ class MediaBridge {
   static final _picker = ImagePicker();
   static const _native = MethodChannel('xyzw/media');
 
-  /// 选图：返回不含 data: 前缀的 base64 列表（H5 Platform 期望 `base64s`）。
+  /// 选图：返回带 `data:image/...;base64,` 前缀的列表。
+  ///
+  /// 换头像确认框 `ChangeHeadImgConfirmDialog` 需要 **两张图**：
+  /// `base64s[0]` / `base64s[1]`，点击确定会对两者做 `.replace`；
+  /// 游戏常传 `imageSize=[512,98]` 表示两个边长。
   static Future<Map<String, dynamic>> chooseImage({
     List<num>? imageSize,
   }) async {
     try {
-      final maxW = (imageSize != null && imageSize.isNotEmpty)
-          ? imageSize[0].toDouble()
-          : 1024.0;
-      final maxH = (imageSize != null && imageSize.length > 1)
-          ? imageSize[1].toDouble()
-          : maxW;
-      // 游戏常传 [512,98]：第二维过扁时按正方形边长处理，避免压成细条
-      final useH =
-          (maxH >= 64 && maxH >= maxW * 0.35) ? maxH : maxW;
+      final sizes = <int>[];
+      if (imageSize != null && imageSize.isNotEmpty) {
+        for (final s in imageSize) {
+          final n = s.toInt();
+          if (n > 0) sizes.add(n.clamp(32, 4096));
+        }
+      }
+      if (sizes.isEmpty) {
+        sizes.add(512);
+        sizes.add(98);
+      } else if (sizes.length == 1) {
+        // 确认框仍读 [1]，单尺寸时补一张同图避免 n.replace 崩溃
+        sizes.add(sizes.first);
+      }
 
-      AppLog.i('media', 'chooseImage open picker max=${maxW.toInt()}x${useH.toInt()}');
+      final pickMax = sizes.reduce((a, b) => a > b ? a : b).toDouble();
+      AppLog.i(
+        'media',
+        'chooseImage open picker max=${pickMax.toInt()} sizes=$sizes',
+      );
       final file = await _picker.pickImage(
         source: ImageSource.gallery,
-        maxWidth: maxW.clamp(64, 4096),
-        maxHeight: useH.clamp(64, 4096),
+        maxWidth: pickMax.clamp(64, 4096),
+        maxHeight: pickMax.clamp(64, 4096),
         imageQuality: 92,
         requestFullMetadata: false,
       );
@@ -54,12 +68,19 @@ class MediaBridge {
           'base64s': <String>[],
         };
       }
-      final b64 = base64Encode(bytes);
-      AppLog.i('media', 'chooseImage ok bytes=${bytes.length}');
+
+      final base64s = <String>[];
+      for (final side in sizes) {
+        base64s.add(await _toDataUrl(bytes, maxSide: side));
+      }
+      AppLog.i(
+        'media',
+        'chooseImage ok bytes=${bytes.length} base64s=${base64s.length}',
+      );
       return {
         'errCode': 0,
         'errMsg': 'chooseImage:ok',
-        'base64s': <String>[b64],
+        'base64s': base64s,
       };
     } catch (e) {
       AppLog.e('media', 'chooseImage 失败: $e');
@@ -68,6 +89,48 @@ class MediaBridge {
         'errMsg': e.toString(),
         'base64s': <String>[],
       };
+    }
+  }
+
+  /// 按最长边缩放后输出 dataURL（PNG）。
+  static Future<String> _toDataUrl(Uint8List bytes, {required int maxSide}) async {
+    try {
+      final codec0 = await ui.instantiateImageCodec(bytes);
+      final frame0 = await codec0.getNextFrame();
+      final src = frame0.image;
+      final w = src.width;
+      final h = src.height;
+      src.dispose();
+
+      var tw = w;
+      var th = h;
+      if (w > maxSide || h > maxSide) {
+        if (w >= h) {
+          tw = maxSide;
+          th = (h * maxSide / w).round().clamp(1, maxSide);
+        } else {
+          th = maxSide;
+          tw = (w * maxSide / h).round().clamp(1, maxSide);
+        }
+      }
+
+      final codec = await ui.instantiateImageCodec(
+        bytes,
+        targetWidth: tw,
+        targetHeight: th,
+      );
+      final frame = await codec.getNextFrame();
+      final bd = await frame.image.toByteData(format: ui.ImageByteFormat.png);
+      frame.image.dispose();
+      if (bd == null) {
+        return 'data:image/jpeg;base64,${base64Encode(bytes)}';
+      }
+      return 'data:image/png;base64,${base64Encode(bd.buffer.asUint8List())}';
+    } catch (e) {
+      AppLog.w('media', 'resize/$maxSide 失败，回退原图: $e');
+      final isJpeg = bytes.length > 2 && bytes[0] == 0xFF && bytes[1] == 0xD8;
+      final mime = isJpeg ? 'image/jpeg' : 'image/png';
+      return 'data:$mime;base64,${base64Encode(bytes)}';
     }
   }
 

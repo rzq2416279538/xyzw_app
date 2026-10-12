@@ -1371,6 +1371,8 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
     final title = active?.displayName ?? '咸强之王';
 
     return Scaffold(
+      // 键盘弹出时不压缩 WebView，否则 innerHeight 变矮 → 宽>高 → Cocos 横屏
+      resizeToAvoidBottomInset: false,
       backgroundColor: const Color(0xFFF2F2F7),
       body: Column(
         children: [

@@ -1666,11 +1666,29 @@
   // ==========================================================================
   window.__xyzwMediaCb = window.__xyzwMediaCb || {};
   window.__xyzwMediaPayload = window.__xyzwMediaPayload || {};
+  // ChangeHeadImgConfirmDialog 需要 base64s[0]+[1]，并对 dataURL 做 .replace
+  function normalizeChooseResult(r) {
+    if (!r || !r.base64s || !r.base64s.length) return r;
+    var list = r.base64s.slice();
+    for (var i = 0; i < list.length; i++) {
+      var s = String(list[i] || "");
+      if (s && s.indexOf("data:") !== 0) {
+        list[i] =
+          "data:image/jpeg;base64," +
+          s.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/, "");
+      }
+    }
+    if (list.length === 1) list.push(list[0]);
+    r.base64s = list;
+    return r;
+  }
   window.__xyzwMediaDone = function (id, result) {
     try {
       var cb = window.__xyzwMediaCb[id];
       delete window.__xyzwMediaCb[id];
-      if (typeof cb === "function") cb(result || { errCode: -1 });
+      var out = result || { errCode: -1 };
+      if (out.base64s) out = normalizeChooseResult(out);
+      if (typeof cb === "function") cb(out);
     } catch (e) {
       console.warn("[HSDK-Mock] mediaDone", e);
     }

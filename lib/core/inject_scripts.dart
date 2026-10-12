@@ -2093,21 +2093,50 @@ try {
 })();
 ''';
 
-  /// 键盘弹出：固定游戏视口高度，避免 Cocos 因 innerHeight 变矮而重排/黑屏。
-  /// （不再每秒 setOrientation，那会造成短暂黑屏与窗口跳动）
+  /// 键盘弹出：固定游戏视口 + 伪造 Cocos frameSize，避免宽>高触发横屏旋转。
   static const portraitLock = r'''
 (function(){
-  if (window.__xyzwPortraitLockV3) return;
-  window.__xyzwPortraitLockV3 = true;
+  if (window.__xyzwPortraitLockV4) return;
+  window.__xyzwPortraitLockV4 = true;
   var fixedW = Math.max(window.innerWidth || 0, document.documentElement.clientWidth || 0) || 390;
   var fixedH = Math.max(window.innerHeight || 0, document.documentElement.clientHeight || 0) || 844;
-  function applyFixed(){
+  if (fixedW > fixedH) {
+    var tmp = fixedW; fixedW = fixedH; fixedH = tmp;
+  }
+  function patchCcView(){
     try {
-      if (typeof cc !== 'undefined' && cc.view && cc.macro) {
+      if (typeof cc === 'undefined' || !cc.view) return;
+      if (cc.macro) {
         try { cc.view._orientation = cc.macro.ORIENTATION_PORTRAIT; } catch (e0) {}
-        try { cc.view._isRotated = false; } catch (e1) {}
       }
-    } catch (e2) {}
+      try { cc.view._isRotated = false; } catch (e1) {}
+      if (cc.view.__xyzwFramePatched) return;
+      cc.view.__xyzwFramePatched = true;
+      var _gfs = cc.view.getFrameSize && cc.view.getFrameSize.bind(cc.view);
+      cc.view.getFrameSize = function(){
+        if (typeof cc.size === 'function') return cc.size(fixedW, fixedH);
+        return _gfs ? _gfs() : { width: fixedW, height: fixedH };
+      };
+      if (typeof cc.view.setFrameSize === 'function') {
+        var _sfs = cc.view.setFrameSize.bind(cc.view);
+        cc.view.setFrameSize = function(w, h){
+          var ww = w || fixedW, hh = h || fixedH;
+          if (hh < fixedH * 0.92 || ww > hh) {
+            return _sfs(fixedW, fixedH);
+          }
+          return _sfs(ww, hh);
+        };
+      }
+      try {
+        if (cc.view._frameSize) {
+          cc.view._frameSize.width = fixedW;
+          cc.view._frameSize.height = fixedH;
+        }
+      } catch (e2) {}
+    } catch (e3) {}
+  }
+  function applyFixed(){
+    patchCcView();
     try {
       var ids = ['Cocos2dGameContainer', 'GameCanvas', 'GameDiv'];
       for (var i = 0; i < ids.length; i++) {
@@ -2122,14 +2151,14 @@ try {
       if (document.body && document.body.style) {
         document.body.style.minHeight = fixedH + 'px';
       }
-    } catch (e3) {}
+    } catch (e4) {}
   }
   applyFixed();
-  // 只在尺寸「变矮」（键盘）时钉回，不在正常旋转流程里狂刷
   window.addEventListener('resize', function(){
     var h = window.innerHeight || 0;
-    if (h > 0 && h < fixedH * 0.92) {
-      console.warn('[咸强之王][media] keyboard-resize inner=' + h + ' keep=' + fixedH);
+    var w = window.innerWidth || 0;
+    if ((h > 0 && h < fixedH * 0.92) || (w > 0 && h > 0 && w > h)) {
+      console.warn('[咸强之王][media] keyboard-resize inner=' + w + 'x' + h + ' keep=' + fixedW + 'x' + fixedH);
       applyFixed();
     }
   }, true);
@@ -2139,21 +2168,46 @@ try {
       if (h > 0 && h < fixedH * 0.92) applyFixed();
     });
   }
-  console.log('[咸强之王][media] portraitLock v3 on', fixedW + 'x' + fixedH);
+  // Cocos 晚加载时补丁
+  var tries = 0;
+  var timer = setInterval(function(){
+    tries++;
+    patchCcView();
+    if ((typeof cc !== 'undefined' && cc.view && cc.view.__xyzwFramePatched) || tries > 40) {
+      clearInterval(timer);
+    }
+  }, 500);
+  console.log('[咸强之王][media] portraitLock v4 on', fixedW + 'x' + fixedH);
 })();
 ''';
 
   /// 相册/换头像：锁定 HSDK/Platform；补 getClientVersion（否则 200ms 超时→版本太低）。
   static const mediaBridge = r'''
 (function(){
-  if (window.__xyzwMediaBridgePatchV3) return;
-  window.__xyzwMediaBridgePatchV3 = true;
+  if (window.__xyzwMediaBridgePatchV4) return;
+  window.__xyzwMediaBridgePatchV4 = true;
   window.__xyzwMediaCb = window.__xyzwMediaCb || {};
+  // ChangeHeadImgConfirmDialog 需要两张图，且 .replace 剥离 dataURL 前缀
+  function normalizeChooseResult(r){
+    if (!r || !r.base64s || !r.base64s.length) return r;
+    var list = r.base64s.slice();
+    for (var i = 0; i < list.length; i++) {
+      var s = String(list[i] || '');
+      if (s && s.indexOf('data:') !== 0) {
+        list[i] = 'data:image/jpeg;base64,' + s.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/, '');
+      }
+    }
+    if (list.length === 1) list.push(list[0]);
+    r.base64s = list;
+    return r;
+  }
   window.__xyzwMediaDone = function(id, result){
     try {
       var cb = window.__xyzwMediaCb[id];
       delete window.__xyzwMediaCb[id];
-      if (typeof cb === 'function') cb(result || { errCode: -1, base64s: [] });
+      var out = result || { errCode: -1, base64s: [] };
+      if (out.base64s) out = normalizeChooseResult(out);
+      if (typeof cb === 'function') cb(out);
     } catch (e) {
       console.warn('[咸强之王][media] mediaDone', e);
     }
