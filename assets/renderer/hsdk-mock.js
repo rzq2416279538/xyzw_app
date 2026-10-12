@@ -1719,26 +1719,64 @@
     }
   }
   xyzwChooseImage.__xyzwMedia = true;
+  // PlatformH5 换头像：isH5 时先 getClientVersion，200ms 内不回调会 onEventH5ChooseImageErr（版本太低）
+  function xyzwGetClientVersion(callback) {
+    var info = {
+      errCode: 0,
+      version: "4.2.1",
+      clientVersion: "4.2.1",
+      errMsg: "getClientVersion:ok",
+    };
+    console.warn("[HSDK-Mock] getClientVersion", info);
+    if (typeof callback === "function") {
+      try {
+        callback(info);
+      } catch (e) {}
+    }
+    return Promise.resolve(info);
+  }
+  xyzwGetClientVersion.__xyzwMedia = true;
   function xyzwSaveImage(callback, options) {
     var id = "s" + Date.now() + "_" + Math.floor(Math.random() * 1e6);
     window.__xyzwMediaCb[id] =
       typeof callback === "function" ? callback : function () {};
     var base64 = "";
     if (options && options.base64 != null) base64 = String(options.base64);
-    else if (callback && typeof callback === "object" && callback.base64 != null) {
+    else if (options && options.imagePath != null) {
+      base64 = String(options.imagePath).replace(
+        /^data:image\/[a-zA-Z0-9+.-]+;base64,/,
+        "",
+      );
+    } else if (callback && typeof callback === "object" && callback.base64 != null) {
       base64 = String(callback.base64);
     }
-    // 大图不塞进 JSChannel，暂存后由 Flutter 回读
-    window.__xyzwMediaPayload[id] = base64;
-    console.warn("[HSDK-Mock] saveImage", id, "len=" + base64.length);
-    if (!postMedia("saveImage", id, { hasPayload: true })) {
-      delete window.__xyzwMediaPayload[id];
-      window.__xyzwMediaDone(id, { errCode: -1, errMsg: "no bridge" });
+    // 分片经 XyzwBridge 送 Dart（页面暂存回读在 WK 上常读到空）
+    var chunkSize = 120000;
+    var total = Math.max(1, Math.ceil(base64.length / chunkSize) || 1);
+    console.warn(
+      "[HSDK-Mock] saveImage",
+      id,
+      "len=" + base64.length,
+      "chunks=" + total,
+    );
+    for (var i = 0; i < total; i++) {
+      if (
+        !postMedia("saveImage", id, {
+          chunk: i,
+          total: total,
+          data: base64.slice(i * chunkSize, (i + 1) * chunkSize),
+          payloadLen: base64.length,
+        })
+      ) {
+        window.__xyzwMediaDone(id, { errCode: -1, errMsg: "no bridge" });
+        return;
+      }
     }
   }
   xyzwSaveImage.__xyzwMedia = true;
   HSDK.chooseImage = xyzwChooseImage;
   HSDK.saveImage = xyzwSaveImage;
+  HSDK.getClientVersion = xyzwGetClientVersion;
 
   // ==================== 完善 window.HSDK ====================
   // 直接增强现有的 window.HSDK 对象（由 patch.js 创建），而不是替换它。
@@ -1791,9 +1829,10 @@
       "trackEvent",
       "_fetchCryptRule",
       "_loginCheck",
-      // 相册：PlatformH5 → i.chooseImage / i.saveImage（须纳入保护，防 turnpass 盖掉）
+      // 相册/换头像：PlatformH5 → i.chooseImage / i.saveImage / i.getClientVersion
       "chooseImage",
       "saveImage",
+      "getClientVersion",
     ];
 
     for (var i = 0; i < functionNames.length; i++) {
@@ -1998,18 +2037,45 @@
    * @returns {void}
    */
   function bindSetClipboard(target) {
-    if (!target || typeof target.setClipboard === "function") return;
-    target.setClipboard = function (options) {
-      var text =
-        options && (options.text || options.data) != null
-          ? options.text || options.data
-          : options;
-      copyToClipboard(text);
-      return Promise.resolve({ errMsg: "setClipboard:ok", data: text });
-    };
-    target.setClipboardData = function (options) {
-      return target.setClipboard(options);
-    };
+    if (!target) return;
+    if (typeof target.setClipboard !== "function") {
+      target.setClipboard = function (options) {
+        var text =
+          options && (options.text || options.data) != null
+            ? options.text || options.data
+            : options;
+        copyToClipboard(text);
+        return Promise.resolve({ errMsg: "setClipboard:ok", data: text });
+      };
+    }
+    if (typeof target.setClipboardData !== "function") {
+      target.setClipboardData = function (options) {
+        return target.setClipboard(options);
+      };
+    }
+    // 粘贴：游戏/输入框可能走 getClipboard
+    if (typeof target.getClipboard !== "function") {
+      target.getClipboard = function (callback) {
+        var done = function (text) {
+          var r = { errCode: 0, data: text || "", text: text || "" };
+          if (typeof callback === "function") callback(r);
+          return r;
+        };
+        try {
+          if (navigator.clipboard && navigator.clipboard.readText) {
+            return navigator.clipboard.readText().then(done).catch(function () {
+              return done("");
+            });
+          }
+        } catch (e) {}
+        return Promise.resolve(done(""));
+      };
+    }
+    if (typeof target.getClipboardData !== "function") {
+      target.getClipboardData = function (options) {
+        return target.getClipboard(options && options.success);
+      };
+    }
   }
 
   bindSetClipboard(window);
@@ -2039,6 +2105,12 @@
     }
     if (typeof target.saveImage !== "function" || !target.saveImage.__xyzwMedia) {
       target.saveImage = xyzwSaveImage;
+    }
+    if (
+      typeof target.getClientVersion !== "function" ||
+      !target.getClientVersion.__xyzwMedia
+    ) {
+      target.getClientVersion = xyzwGetClientVersion;
     }
   }
   function rebindMediaAll() {

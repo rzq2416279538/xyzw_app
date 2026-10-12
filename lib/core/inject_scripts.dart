@@ -1671,7 +1671,54 @@ try {
     if (!window.GM_unregisterMenuCommand) window.GM_unregisterMenuCommand = function(){};
     if (!window.GM_download) window.GM_download = function(o){
         var url = (o && o.url) || o;
-        console.log('[咸强之王] 脚本请求下载(已忽略): ' + String(url).slice(0, 120));
+        var name = (o && o.name) || 'download';
+        console.warn('[咸强之王][media] GM_download', String(url).slice(0, 80), name);
+        // blob/data 图片：转相册保存（脚本常把「保存成功」绑在 onload）
+        function fail(err){
+          console.warn('[咸强之王][media] GM_download fail', err);
+          if (o && o.onerror) try { o.onerror({ error: String(err || 'fail') }); } catch (e0) {}
+        }
+        function ok(){
+          console.warn('[咸强之王][media] GM_download saved');
+          if (o && o.onload) try { o.onload(); } catch (e1) {}
+        }
+        function saveDataUrl(dataUrl){
+          if (!window.__xyzwMediaDone || !window.XyzwBridge) return fail('no media bridge');
+          var id = 'g' + Date.now() + '_' + Math.floor(Math.random() * 1e6);
+          var base64 = String(dataUrl).replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/, '');
+          window.__xyzwMediaCb = window.__xyzwMediaCb || {};
+          window.__xyzwMediaCb[id] = function(r){
+            if (r && r.errCode === 0) ok(); else fail(r && r.errMsg);
+          };
+          var chunkSize = 120000;
+          var total = Math.max(1, Math.ceil(base64.length / chunkSize) || 1);
+          for (var i = 0; i < total; i++) {
+            try {
+              window.XyzwBridge.postMessage(JSON.stringify({
+                type: 'media', action: 'saveImage', id: id,
+                chunk: i, total: total,
+                data: base64.slice(i * chunkSize, (i + 1) * chunkSize),
+                payloadLen: base64.length,
+                from: 'GM_download'
+              }));
+            } catch (e2) { return fail(e2); }
+          }
+        }
+        try {
+          if (typeof url === 'string' && url.indexOf('data:image') === 0) {
+            saveDataUrl(url); return;
+          }
+          if (typeof url === 'string' && url.indexOf('blob:') === 0) {
+            fetch(url).then(function(res){ return res.blob(); }).then(function(blob){
+              var reader = new FileReader();
+              reader.onload = function(){ saveDataUrl(String(reader.result || '')); };
+              reader.onerror = function(){ fail('read blob'); };
+              reader.readAsDataURL(blob);
+            }).catch(fail);
+            return;
+          }
+        } catch (e3) { return fail(e3); }
+        console.log('[咸强之王] 脚本请求下载(非图片已忽略): ' + String(url).slice(0, 120));
         if (o && o.onerror) o.onerror({ error: 'not_supported' });
     };
     if (!window.GM_getResourceText) window.GM_getResourceText = function(){ return ''; };
@@ -2046,74 +2093,62 @@ try {
 })();
 ''';
 
-  /// 强制竖屏：键盘弹出后 innerHeight 变矮，Cocos 会误判横屏并旋转画布。
+  /// 键盘弹出：固定游戏视口高度，避免 Cocos 因 innerHeight 变矮而重排/黑屏。
+  /// （不再每秒 setOrientation，那会造成短暂黑屏与窗口跳动）
   static const portraitLock = r'''
 (function(){
-  if (window.__xyzwPortraitLockV2) return;
-  window.__xyzwPortraitLockV2 = true;
-  function stripRotate(el){
-    if (!el || !el.style) return;
-    var t = el.style.transform || '';
-    if (/rotate\s*\(/i.test(t)) {
-      el.style.transform = t.replace(/rotate\s*\([^)]*\)/ig, 'rotate(0deg)');
-    }
-  }
-  function forcePortrait(){
-    try {
-      if (window.screen && screen.orientation && screen.orientation.lock) {
-        screen.orientation.lock('portrait').catch(function(){});
-      }
-    } catch (e0) {}
+  if (window.__xyzwPortraitLockV3) return;
+  window.__xyzwPortraitLockV3 = true;
+  var fixedW = Math.max(window.innerWidth || 0, document.documentElement.clientWidth || 0) || 390;
+  var fixedH = Math.max(window.innerHeight || 0, document.documentElement.clientHeight || 0) || 844;
+  function applyFixed(){
     try {
       if (typeof cc !== 'undefined' && cc.view && cc.macro) {
-        try { cc.view.setOrientation(cc.macro.ORIENTATION_PORTRAIT); } catch (eA) {}
-        try { cc.view._orientation = cc.macro.ORIENTATION_PORTRAIT; } catch (eB) {}
-        try {
-          Object.defineProperty(cc.view, '_isRotated', {
-            configurable: true,
-            get: function(){ return false; },
-            set: function(){}
-          });
-        } catch (eC) {
-          try { cc.view._isRotated = false; } catch (eD) {}
-        }
-        if (typeof cc.view.setOrientation === 'function' && !cc.view.setOrientation.__xyzwP) {
-          var _so = cc.view.setOrientation.bind(cc.view);
-          cc.view.setOrientation = function(){
-            return _so(cc.macro.ORIENTATION_PORTRAIT);
-          };
-          cc.view.setOrientation.__xyzwP = true;
+        try { cc.view._orientation = cc.macro.ORIENTATION_PORTRAIT; } catch (e0) {}
+        try { cc.view._isRotated = false; } catch (e1) {}
+      }
+    } catch (e2) {}
+    try {
+      var ids = ['Cocos2dGameContainer', 'GameCanvas', 'GameDiv'];
+      for (var i = 0; i < ids.length; i++) {
+        var el = document.getElementById(ids[i]);
+        if (!el || !el.style) continue;
+        el.style.width = fixedW + 'px';
+        el.style.height = fixedH + 'px';
+        if (el.style.transform && /rotate\s*\(/i.test(el.style.transform)) {
+          el.style.transform = el.style.transform.replace(/rotate\s*\([^)]*\)/ig, 'rotate(0deg)');
         }
       }
-    } catch (e1) {}
-    try {
-      stripRotate(document.getElementById('GameCanvas'));
-      stripRotate(document.getElementById('Cocos2dGameContainer'));
-      stripRotate(document.body);
-      stripRotate(document.documentElement);
-    } catch (e2) {}
+      if (document.body && document.body.style) {
+        document.body.style.minHeight = fixedH + 'px';
+      }
+    } catch (e3) {}
   }
-  forcePortrait();
-  window.addEventListener('resize', forcePortrait, true);
-  window.addEventListener('orientationchange', forcePortrait, true);
-  window.addEventListener('focus', forcePortrait, true);
-  document.addEventListener('focusin', forcePortrait, true);
+  applyFixed();
+  // 只在尺寸「变矮」（键盘）时钉回，不在正常旋转流程里狂刷
+  window.addEventListener('resize', function(){
+    var h = window.innerHeight || 0;
+    if (h > 0 && h < fixedH * 0.92) {
+      console.warn('[咸强之王][media] keyboard-resize inner=' + h + ' keep=' + fixedH);
+      applyFixed();
+    }
+  }, true);
   if (window.visualViewport) {
-    window.visualViewport.addEventListener('resize', forcePortrait);
+    window.visualViewport.addEventListener('resize', function(){
+      var h = window.visualViewport.height || 0;
+      if (h > 0 && h < fixedH * 0.92) applyFixed();
+    });
   }
-  setInterval(forcePortrait, 800);
-  console.log('[咸强之王][media] portraitLock v2 on');
+  console.log('[咸强之王][media] portraitLock v3 on', fixedW + 'x' + fixedH);
 })();
 ''';
 
-  /// 相册能力：锁定 HSDK/PlatformManager（防 turnpass 盖掉），并记录 SHOW_TIP。
-  /// PlatformH5：chooseImage([512,98]) / saveImage({imagePath:dataUrl})
+  /// 相册/换头像：锁定 HSDK/Platform；补 getClientVersion（否则 200ms 超时→版本太低）。
   static const mediaBridge = r'''
 (function(){
-  if (window.__xyzwMediaBridgePatchV2) return;
-  window.__xyzwMediaBridgePatchV2 = true;
+  if (window.__xyzwMediaBridgePatchV3) return;
+  window.__xyzwMediaBridgePatchV3 = true;
   window.__xyzwMediaCb = window.__xyzwMediaCb || {};
-  window.__xyzwMediaPayload = window.__xyzwMediaPayload || {};
   window.__xyzwMediaDone = function(id, result){
     try {
       var cb = window.__xyzwMediaCb[id];
@@ -2160,16 +2195,25 @@ try {
         base64 = String(opts.imagePath)
           .replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/, '');
       }
-      window.__xyzwMediaPayload[id] = base64;
       window.__xyzwMediaCb[id] = function(r){
-        console.warn('[咸强之王][media] saveImage done', id, r && r.errCode);
+        console.warn('[咸强之王][media] saveImage done', id, r && r.errCode, r && r.errMsg);
         if (r && r.errCode === 0) resolve(r);
         else reject(r || { errCode: -1, errMsg: 'save fail' });
       };
-      console.warn('[咸强之王][media] saveImage', id, 'len=' + base64.length);
-      if (!postMedia('saveImage', id, { hasPayload: true })) {
-        delete window.__xyzwMediaPayload[id];
-        window.__xyzwMediaDone(id, { errCode: -1, errMsg: 'no bridge' });
+      var chunkSize = 120000;
+      var total = Math.max(1, Math.ceil(base64.length / chunkSize) || 1);
+      console.warn('[咸强之王][media] saveImage', id, 'len=' + base64.length, 'chunks=' + total);
+      for (var i = 0; i < total; i++) {
+        var piece = base64.slice(i * chunkSize, (i + 1) * chunkSize);
+        if (!postMedia('saveImage', id, {
+          chunk: i,
+          total: total,
+          data: piece,
+          payloadLen: base64.length
+        })) {
+          window.__xyzwMediaDone(id, { errCode: -1, errMsg: 'no bridge' });
+          return;
+        }
       }
     });
   }
@@ -2192,8 +2236,21 @@ try {
       if (typeof callback === 'function') callback(r);
     });
   }
+  // 换头像关键：PlatformH5.getClientVersion → i.getClientVersion(cb)，须 <200ms 回调
+  function hsdkGetClientVersion(callback){
+    var info = { errCode: 0, version: '4.2.1', clientVersion: '4.2.1', errMsg: 'getClientVersion:ok' };
+    console.warn('[咸强之王][media] getClientVersion', info.version);
+    if (typeof callback === 'function') {
+      try { callback(info); } catch (e) {}
+    }
+    return Promise.resolve(info);
+  }
+  function getClientVersionPromise(){
+    return hsdkGetClientVersion();
+  }
   hsdkChooseImage.__xyzwMedia = true;
   hsdkSaveImage.__xyzwMedia = true;
+  hsdkGetClientVersion.__xyzwMedia = true;
   function lockFn(obj, name, fn){
     if (!obj) return;
     try {
@@ -2201,7 +2258,7 @@ try {
         configurable: true,
         enumerable: true,
         get: function(){ return fn; },
-        set: function(){ /* 忽略外部覆盖 */ }
+        set: function(){}
       });
     } catch (e) {
       try { obj[name] = fn; } catch (e2) {}
@@ -2219,6 +2276,7 @@ try {
       for (var i = 0; i < targets.length; i++) {
         lockFn(targets[i], 'chooseImage', hsdkChooseImage);
         lockFn(targets[i], 'saveImage', hsdkSaveImage);
+        lockFn(targets[i], 'getClientVersion', hsdkGetClientVersion);
       }
     } catch (e) {}
   }
@@ -2229,64 +2287,36 @@ try {
       if (!inst) return false;
       lockFn(inst, 'chooseImage', function(e){ return chooseImagePromise(e); });
       lockFn(inst, 'saveImage', function(e){ return saveImagePromise(e); });
+      lockFn(inst, 'getClientVersion', function(){ return getClientVersionPromise(); });
       if (inst._platform) {
         lockFn(inst._platform, 'chooseImage', function(e){ return chooseImagePromise(e); });
         lockFn(inst._platform, 'saveImage', function(e){ return saveImagePromise(e); });
+        lockFn(inst._platform, 'getClientVersion', function(){ return getClientVersionPromise(); });
       }
-      // 也钉原型，防止只走到 prototype
       try {
         var proto = Object.getPrototypeOf(inst);
         if (proto) {
           lockFn(proto, 'chooseImage', function(e){ return chooseImagePromise(e); });
           lockFn(proto, 'saveImage', function(e){ return saveImagePromise(e); });
+          lockFn(proto, 'getClientVersion', function(){ return getClientVersionPromise(); });
         }
       } catch (e3) {}
       if (!window.__xyzwMediaPlatLogged) {
         window.__xyzwMediaPlatLogged = true;
-        console.warn('[咸强之王][media] PlatformManager locked isH5=' + !!inst.isH5);
+        console.warn('[咸强之王][media] PlatformManager locked v3 isH5=' + !!inst.isH5);
       }
       return true;
     } catch (e) {
       return false;
     }
   }
-  // 记录游戏 tip，便于确认「版本太低」文案来源（不改 tip 行为）
-  try {
-    if (!window.__xyzwTipLogHook) {
-      window.__xyzwTipLogHook = true;
-      var tipIv = setInterval(function(){
-        try {
-          var g = window;
-          var names = ['SHOW_TIP','showTip'];
-          for (var i = 0; i < names.length; i++) {
-            var fn = g[names[i]];
-            if (typeof fn === 'function' && !fn.__xyzwTipLog) {
-              g[names[i]] = function(orig){
-                return function(msg){
-                  try {
-                    var s = String(msg == null ? '' : msg);
-                    if (/版本|更新|相册|保存|头像|支持|C_P1|SAVE_TO_ALBUM/i.test(s)) {
-                      console.warn('[咸强之王][media] SHOW_TIP', s.slice(0, 160));
-                    }
-                  } catch (e0) {}
-                  return orig.apply(this, arguments);
-                };
-              }(fn);
-              g[names[i]].__xyzwTipLog = true;
-            }
-          }
-        } catch (e1) {}
-      }, 1000);
-      setTimeout(function(){ clearInterval(tipIv); }, 120000);
-    }
-  } catch (eTip) {}
   function tick(){
     patchHsdk();
     patchPlatform();
   }
   tick();
   setInterval(tick, 1000);
-  console.warn('[咸强之王][media] bridge patch v2 installed');
+  console.warn('[咸强之王][media] bridge patch v3 installed');
 })();
 ''';
 

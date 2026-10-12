@@ -68,6 +68,15 @@ class _Session {
   String? error;
 }
 
+class _MediaChunkBuf {
+  _MediaChunkBuf({required this.total, required this.payloadLen})
+      : parts = List<String?>.filled(total < 1 ? 1 : total, null);
+
+  final int total;
+  final int payloadLen;
+  final List<String?> parts;
+}
+
 class GamePageState extends State<GamePage> with WidgetsBindingObserver {
   LocalHttpServer? _server;
   var _ownsServer = false;
@@ -1053,47 +1062,44 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
     }
   }
 
-  /// 从 WebView 暂存分片读取 base64（避免单次 ReturningResult 过大）。
-  Future<String> _readMediaPayload(WebViewController ctrl, String reqId) async {
-    final idLit = jsonEncode(reqId);
-    final lenRaw = await ctrl.runJavaScriptReturningResult(
-      "(window.__xyzwMediaPayload&&window.__xyzwMediaPayload[$idLit]||'').length",
-    );
-    final len = int.tryParse(lenRaw.toString()) ?? 0;
-    if (len <= 0) return '';
-    const chunk = 240000;
-    final buf = StringBuffer();
-    for (var off = 0; off < len; off += chunk) {
-      final end = off + chunk > len ? len : off + chunk;
-      final partRaw = await ctrl.runJavaScriptReturningResult(
-        "(window.__xyzwMediaPayload[$idLit]||'').substring($off,$end)",
-      );
-      var part = partRaw.toString();
-      if (part.startsWith('"') && part.endsWith('"') && part.length >= 2) {
-        try {
-          final decoded = jsonDecode(part);
-          part = decoded is String ? decoded : part.substring(1, part.length - 1);
-        } catch (_) {
-          part = part.substring(1, part.length - 1);
-        }
-      }
-      buf.write(part);
-    }
-    await ctrl.runJavaScript(
-      "try{if(window.__xyzwMediaPayload)delete window.__xyzwMediaPayload[$idLit]}catch(e){}",
-    );
-    return buf.toString();
-  }
+  /// 分片拼装：JS → XyzwBridge 多条 saveImage(chunk/total/data)
+  final Map<String, _MediaChunkBuf> _mediaChunks = {};
 
   Future<void> _handleMedia(String accountId, Map<String, dynamic> map) async {
     final action = map['action'] as String? ?? '';
     final reqId = map['id'] as String? ?? '';
     if (reqId.isEmpty) return;
-    AppLog.diag('media', {
-      'event': action,
-      'accountId': accountId,
-      'id': reqId,
-    });
+
+    // 分片：未收齐则先返回，不回调 JS
+    if (action == 'saveImage' && map['chunk'] != null) {
+      final chunk = (map['chunk'] as num?)?.toInt() ?? 0;
+      final total = (map['total'] as num?)?.toInt() ?? 1;
+      final data = map['data'] as String? ?? '';
+      final payloadLen = (map['payloadLen'] as num?)?.toInt() ?? 0;
+      final from = map['from'] as String? ?? '';
+      var buf = _mediaChunks[reqId];
+      if (buf == null || buf.total != total) {
+        buf = _MediaChunkBuf(total: total, payloadLen: payloadLen);
+        _mediaChunks[reqId] = buf;
+      }
+      if (chunk >= 0 && chunk < buf.parts.length) {
+        buf.parts[chunk] = data;
+      }
+      final got = buf.parts.whereType<String>().length;
+      AppLog.i(
+        'media',
+        'saveImage chunk $chunk/${total - 1} got=$got/$total '
+        'piece=${data.length} expect=$payloadLen from=$from id=$reqId',
+      );
+      if (got < total) return;
+      _mediaChunks.remove(reqId);
+      final b64 = buf.parts.map((e) => e ?? '').join();
+      AppLog.i('media', 'saveImage 拼装完成 len=${b64.length} expect=$payloadLen');
+      await _finishMediaSave(accountId, reqId, b64);
+      return;
+    }
+
+    AppLog.i('media', 'bridge action=$action id=$reqId keys=${map.keys.join(",")}');
     Map<String, dynamic> result;
     try {
       if (action == 'chooseImage') {
@@ -1104,25 +1110,48 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
         }
         result = await MediaBridge.chooseImage(imageSize: sizes);
       } else if (action == 'saveImage') {
-        // 大图 base64 不走 JSChannel；从页面暂存分片回读
-        var b64 = map['base64'] as String? ?? '';
-        final ctrl = _sessions[accountId]?.controller;
-        if (b64.isEmpty && ctrl != null) {
-          try {
-            b64 = await _readMediaPayload(ctrl, reqId);
-          } catch (e) {
-            AppLog.w('media', '取 saveImage payload 失败: $e');
-          }
-        }
+        var b64 = map['base64'] as String? ?? map['data'] as String? ?? '';
+        AppLog.i('media', 'saveImage 单包 len=${b64.length}');
         result = await MediaBridge.saveImage(b64);
       } else {
         result = {'errCode': -1, 'errMsg': 'unknown action $action'};
       }
-    } catch (e) {
+    } catch (e, st) {
+      AppLog.e('media', 'handle 异常: $e\n$st');
       result = {'errCode': -1, 'errMsg': e.toString()};
     }
+    await _resolveMediaJs(accountId, reqId, result);
+  }
+
+  Future<void> _finishMediaSave(
+    String accountId,
+    String reqId,
+    String b64,
+  ) async {
+    Map<String, dynamic> result;
+    try {
+      result = await MediaBridge.saveImage(b64);
+    } catch (e, st) {
+      AppLog.e('media', 'saveImage 异常: $e\n$st');
+      result = {'errCode': -1, 'errMsg': e.toString()};
+    }
+    AppLog.i(
+      'media',
+      'saveImage 结果 errCode=${result['errCode']} errMsg=${result['errMsg']}',
+    );
+    await _resolveMediaJs(accountId, reqId, result);
+  }
+
+  Future<void> _resolveMediaJs(
+    String accountId,
+    String reqId,
+    Map<String, dynamic> result,
+  ) async {
     final session = _sessions[accountId];
-    if (session == null) return;
+    if (session == null) {
+      AppLog.w('media', '回传失败：无 session $accountId');
+      return;
+    }
     try {
       await session.controller.runJavaScript(MediaBridge.jsResolve(reqId, result));
     } catch (e) {
