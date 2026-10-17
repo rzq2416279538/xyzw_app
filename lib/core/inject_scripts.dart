@@ -149,6 +149,57 @@ class InjectScripts {
     var s = String(u || '').toLowerCase();
     return /manifest|authuser|serverlist|salt|yanchang|peach|pantao|legion|pvp|battle|match|activity|miniGame|bundle/i.test(s);
   }
+  function clip(v, n){
+    n = n || 800;
+    var s = '';
+    try {
+      if (v == null) return '';
+      if (typeof v === 'string') s = v;
+      else if (typeof ArrayBuffer !== 'undefined' && v instanceof ArrayBuffer) s = '[ArrayBuffer ' + v.byteLength + ']';
+      else if (typeof ArrayBuffer !== 'undefined' && ArrayBuffer.isView && ArrayBuffer.isView(v)) s = '[bytes ' + v.byteLength + ']';
+      else if (typeof Blob !== 'undefined' && v instanceof Blob) s = '[Blob ' + v.size + ' ' + (v.type || '') + ']';
+      else if (typeof FormData !== 'undefined' && v instanceof FormData) s = '[FormData]';
+      else s = String(v);
+    } catch (e) { s = '[unreadable]'; }
+    if (s.length > n) return s.slice(0, n) + '…(' + s.length + ')';
+    return s;
+  }
+  function isStaticAsset(url){
+    return /\.(png|jpg|jpeg|webp|gif|mp3|ogg|wav|astc|pvr|bin|wasm|atlas|skel|ttf|otf|woff2?)(\?|$)/i.test(String(url || ''));
+  }
+  function headersOf(h){
+    var out = [];
+    try {
+      if (!h) return '';
+      if (typeof Headers !== 'undefined' && h instanceof Headers) {
+        h.forEach(function(v, k){ out.push(k + '=' + clip(v, 160)); });
+      } else if (Object.prototype.toString.call(h) === '[object Array]') {
+        for (var i = 0; i < h.length; i++) out.push(h[i][0] + '=' + clip(h[i][1], 160));
+      } else if (typeof h === 'object') {
+        for (var k in h) {
+          if (Object.prototype.hasOwnProperty.call(h, k)) out.push(k + '=' + clip(h[k], 160));
+        }
+      }
+    } catch (e) {}
+    return out.join('; ').slice(0, 700);
+  }
+  function logReq(kind, method, url, headers, body){
+    var u = String(url || '');
+    log('REQ', kind, method, u.slice(0, 320),
+      'hdr=' + (headers || ''),
+      'body=' + (isStaticAsset(u) ? '' : clip(body, 800)));
+  }
+  function logRes(kind, method, url, status, headers, body, bytes){
+    var u = String(url || '');
+    if (isStaticAsset(u)) {
+      log('RES', kind, method, status, u.slice(0, 240), 'bytes=' + (bytes || 0));
+      return;
+    }
+    log('RES', kind, method, status, u.slice(0, 320),
+      'hdr=' + (headers || ''),
+      'bytes=' + (bytes || 0),
+      'body=' + clip(body, 800));
+  }
   function summarizeManifest(obj){
     if (!obj || typeof obj !== 'object') return { parse: false };
     // 线上 Login_ManifestResp 形如 {cmd,body:{isLast,battleVersion,bundleVers,...}}
@@ -207,25 +258,42 @@ class InjectScripts {
       var wrapped = function(input, init){
         var url = '';
         var method = 'GET';
+        var reqHeaders = '';
+        var body = '';
         try {
           url = (typeof input === 'string') ? input : (input && input.url) || '';
           method = ((init && init.method) || (input && input.method) || 'GET').toUpperCase();
+          reqHeaders = headersOf((init && init.headers) || (input && input.headers));
+          body = (init && init.body != null) ? init.body : '';
         } catch (e) {}
         var host = '';
         try { host = new URL(String(url), location.href).hostname; } catch (e2) {}
         if (isLocalFakeHost(host)) {
           log('fetch-local-bypass', method, host, String(url).slice(0,160));
-        } else if (interestingUrl(url)) {
-          log('fetch', method, String(url).slice(0,180));
         }
+        logReq('fetch', method, url, reqHeaders, body);
         return _fetch.apply(this, arguments).then(function(res){
           try {
-            if (interestingUrl(url) || /manifest/i.test(url)) {
-              var clone = res.clone();
-              clone.text().then(function(t){ inspectBody(url, t, 'fetch'); }).catch(function(){});
+            var rh = headersOf(res.headers);
+            var ct = '';
+            try { ct = res.headers.get('content-type') || ''; } catch (eCt) {}
+            if (isStaticAsset(url) || /^(image|audio|video|font)\//i.test(ct)) {
+              logRes('fetch', method, url, res.status, rh, '', 0);
+            } else {
+              res.clone().text().then(function(t){
+                try { inspectBody(url, t, 'fetch'); } catch (eIns) {}
+                logRes('fetch', method, url, res.status, rh, t, t.length);
+              }).catch(function(){
+                logRes('fetch', method, url, res.status, rh, '', 0);
+              });
             }
-          } catch (e3) {}
+          } catch (e3) {
+            logRes('fetch', method, url, res && res.status, '', '', 0);
+          }
           return res;
+        }, function(err){
+          log('RES', 'fetch', method, 'FAIL', String(url).slice(0, 300), clip(err && err.message || err, 200));
+          throw err;
         });
       };
       wrapped.__xyzwPvpWrapped = true;
@@ -239,12 +307,24 @@ class InjectScripts {
       XP.__xyzwPvpXhr = true;
       var _open = XP.open;
       var _send = XP.send;
+      var _setHeader = XP.setRequestHeader;
       XP.open = function(method, url){
         this.__xyzwPvpUrl = String(url || '');
         this.__xyzwPvpMethod = String(method || 'GET');
+        this.__xyzwHdrs = [];
         return _open.apply(this, arguments);
       };
-      XP.send = function(){
+      if (typeof _setHeader === 'function' && !_setHeader.__xyzwPvp) {
+        XP.setRequestHeader = function(key, value){
+          try {
+            if (!this.__xyzwHdrs) this.__xyzwHdrs = [];
+            this.__xyzwHdrs.push(String(key) + '=' + clip(value, 160));
+          } catch (eH) {}
+          return _setHeader.apply(this, arguments);
+        };
+        XP.setRequestHeader.__xyzwPvp = true;
+      }
+      XP.send = function(body){
         var xhr = this;
         var url = xhr.__xyzwPvpUrl || '';
         var method = (xhr.__xyzwPvpMethod || 'GET').toUpperCase();
@@ -252,18 +332,71 @@ class InjectScripts {
         try { host = new URL(url, location.href).hostname; } catch (e) {}
         if (isLocalFakeHost(host)) {
           log('xhr-local-bypass', method, host, url.slice(0,160));
-        } else if (interestingUrl(url)) {
-          log('xhr', method, url.slice(0,180));
         }
-        if (interestingUrl(url) || /manifest/i.test(url)) {
-          xhr.addEventListener('load', function(){
-            try { inspectBody(url, xhr.responseText, 'xhr'); } catch (e2) {}
-          });
-        }
+        logReq('xhr', method, url, (xhr.__xyzwHdrs || []).join('; ').slice(0, 700), body);
+        xhr.addEventListener('loadend', function(){
+          var rh = '';
+          var text = '';
+          var bytes = 0;
+          try { rh = String(xhr.getAllResponseHeaders() || '').replace(/\s*\n\s*/g, '; ').slice(0, 700); } catch (eRh) {}
+          try {
+            if (!xhr.responseType || xhr.responseType === 'text') {
+              text = xhr.responseText || '';
+              bytes = text.length;
+            } else if (xhr.response && xhr.response.byteLength != null) {
+              bytes = xhr.response.byteLength;
+              text = '[' + (xhr.responseType || 'bin') + ' ' + bytes + ']';
+            } else if (typeof xhr.response === 'string') {
+              text = xhr.response;
+              bytes = text.length;
+            }
+          } catch (eBody) {}
+          try { if (interestingUrl(url) || /manifest/i.test(url)) inspectBody(url, text, 'xhr'); } catch (eIns) {}
+          logRes('xhr', method, url, xhr.status, rh, text, bytes);
+        });
+        xhr.addEventListener('error', function(){
+          log('RES', 'xhr', method, 'FAIL', String(url).slice(0, 300));
+        });
+        xhr.addEventListener('timeout', function(){
+          log('RES', 'xhr', method, 'TIMEOUT', String(url).slice(0, 300));
+        });
         return _send.apply(this, arguments);
       };
     }
   } catch (e) {}
+  // —— WebSocket：盐场战场多走这里，记连接、发送和收到的帧 ——
+  try {
+    var OrigWS = window.WebSocket;
+    if (typeof OrigWS === 'function' && !OrigWS.__xyzwPvpWs) {
+      var WrappedWS = function(url, protocols){
+        var ws = (protocols === undefined) ? new OrigWS(url) : new OrigWS(url, protocols);
+        var u = String(url || '');
+        log('REQ', 'ws', 'OPEN', u.slice(0, 320));
+        ws.addEventListener('message', function(ev){
+          log('RES', 'ws', 'MSG', u.slice(0, 180), clip(ev && ev.data, 500));
+        });
+        ws.addEventListener('close', function(ev){
+          log('RES', 'ws', 'CLOSE', (ev && ev.code), u.slice(0, 180));
+        });
+        ws.addEventListener('error', function(){
+          log('RES', 'ws', 'ERROR', u.slice(0, 180));
+        });
+        var _sendWs = ws.send;
+        ws.send = function(data){
+          log('REQ', 'ws', 'SEND', u.slice(0, 180), clip(data, 500));
+          return _sendWs.apply(ws, arguments);
+        };
+        return ws;
+      };
+      WrappedWS.prototype = OrigWS.prototype;
+      WrappedWS.CONNECTING = OrigWS.CONNECTING;
+      WrappedWS.OPEN = OrigWS.OPEN;
+      WrappedWS.CLOSING = OrigWS.CLOSING;
+      WrappedWS.CLOSED = OrigWS.CLOSED;
+      WrappedWS.__xyzwPvpWs = true;
+      window.WebSocket = WrappedWS;
+    }
+  } catch (eWs) {}
   // 页面 origin / 本地域提示（对照：iOS 127.0.0.1 vs 自定义 scheme）
   try {
     log('origin', String(location.origin||''), 'href='+String(location.href||'').slice(0,160));
@@ -719,16 +852,26 @@ class InjectScripts {
   }
   function syncCodeVersion(){
     try {
+      if (window.__xyzwKeepActivityBundles) window.__xyzwKeepActivityBundles();
+    } catch (eKeep) {}
+    try {
+      var declared = (typeof CODE_VERSION !== 'undefined') ? String(CODE_VERSION) : '';
+      if (declared) {
+        try { window.CODE_VERSION = declared; } catch (e1) {}
+        try { if (typeof globalThis !== 'undefined') globalThis.CODE_VERSION = declared; } catch (e2) {}
+        if (!_patchFlags.codeSynced) {
+          _patchFlags.codeSynced = true;
+          log('keep CODE_VERSION', declared);
+        }
+        return;
+      }
       var remote = null;
       if (window._CCSettings && window._CCSettings.bundleVers && window._CCSettings.bundleVers.codeVersion) {
         remote = String(window._CCSettings.bundleVers.codeVersion);
       }
       if (remote) {
-        if (typeof CODE_VERSION !== 'undefined') {
-          try { CODE_VERSION = remote; } catch (e0) {}
-        }
-        try { window.CODE_VERSION = remote; } catch (e1) {}
-        try { if (typeof globalThis !== 'undefined') globalThis.CODE_VERSION = remote; } catch (e2) {}
+        try { window.CODE_VERSION = remote; } catch (e3) {}
+        try { if (typeof globalThis !== 'undefined') globalThis.CODE_VERSION = remote; } catch (e4) {}
         if (!_patchFlags.codeSynced) {
           _patchFlags.codeSynced = true;
           log('sync CODE_VERSION', remote);
@@ -1093,6 +1236,10 @@ class InjectScripts {
   forceRejectOff();
   snapshot('boot');
   setTimeout(function(){ tick(0); }, 0);
+  // 登录清单只有两条版本字段，会把盐场包哈希盖掉。进场前一直补回。
+  setInterval(function(){
+    try { if (window.__xyzwKeepActivityBundles) window.__xyzwKeepActivityBundles(); } catch (eKeep) {}
+  }, 2000);
   // 进盐场前用户可能停留较久：每 3 分钟补一张
   setInterval(function(){ snapshot('heartbeat_3m'); }, 180000);
   console.log('[咸强之王][PVP_VER] 盐场版本守卫+快照已启动 搜PVP_SNAP');

@@ -134,6 +134,7 @@ class AppLog {
     buf.writeln('平台: ${Platform.operatingSystem} ${Platform.operatingSystemVersion}');
     buf.writeln('--- 盐场/蟠桃问题请搜这些关键字 ---');
     buf.writeln('PVP_SNAP | PVP_SIM | PVP_VER | CHECK_PVP | RejectLowVersionPvP | codeVersion');
+    buf.writeln('REQ | RES 为每一次请求和响应；静态资源只记状态和大小，接口记请求头、响应头和正文摘要');
     buf.writeln('PVP_SIM verdict=pass 表示版本表和客户端关口已对齐；fail 的 reasons 是仍会异常的原因');
     buf.writeln('客户端数据异常 | 官方最新客户端 | C_Battle_Tips | isLowerVersion | codeMatch');
     buf.writeln('风险位 | GameVersionMisMatch | RemoteCodeMisMatch | fingerprint');

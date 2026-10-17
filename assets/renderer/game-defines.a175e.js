@@ -1,7 +1,7 @@
 'use strict'
 const gt =
   typeof globalThis === 'object' ? globalThis : typeof window === 'object' ? window : global
-gt.PLATFORM = 'h5web'
+gt.PLATFORM = 'h5'
 gt.SUB_PLATFORM = ''
 gt.ENV = 'Prod'
 gt.APPID = 'wx0840558555a454ed'
@@ -10,10 +10,10 @@ gt.CDN = 'https://xxz-xyzw-res.hortorgames.com'
 gt.SERVER = 'https://xxz-xyzw.hortorgames.com'
 gt.GAME_NAME = '咸鱼之王'
 gt.GAME_ID = 'xyzw_mix'
-// 须与线上 manifest.body.bundleVers.codeVersion 对齐；
-// native 路径用 CODE_VERSION===codeVersion 决定 IsLastVersion，对不上会 RejectLowVersionPvP。
-gt.GAME_VERSION = '2.48.2-wx'
-gt.CODE_VERSION = '2.48.2'
+// 能进盐场的网页端报 1.90.2-h5web，登录清单 codeVersion 也是 1.90.2。
+// 活动包哈希另从 0.32.0-android 清单合并，不要把资源包号 2.48.2 写回这里。
+gt.GAME_VERSION = '1.90.2-h5web'
+gt.CODE_VERSION = '1.90.2'
 gt.COMMIT_ID = ''
 gt.CONFIG_COMMIT_ID = ''
 gt.RESOURCES_COMMIT_ID = ''

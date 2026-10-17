@@ -364,6 +364,8 @@ window.parseRemoteBundleVers = function (settingsObj) {
 }
 
 window.loadRemoteBundleVers = async function () {
+  // 1.90.2-h5web 的登录清单只有 codeVersion/COMMIT_ID，没有盐场包。
+  // 活动包在 0.32.0-android 这份清单里（约 1300 条，含 AdvancedMap_01），按需从 CDN 拉。
   const manifestUrl = `https://xxz-xyzw.hortorgames.com/login/manifest?platform=hortor&version=0.32.0-android`
   console.log('[remoteAssets] POST manifest', manifestUrl)
 
@@ -393,38 +395,59 @@ window.loadRemoteBundleVers = async function () {
   }
 
   const bundleVers = window.parseRemoteBundleVers(settingsObj)
-  Object.assign(window._CCSettings.bundleVers, bundleVers)
-  // iOS 壳常被当成 isNative：IsLastVersion = (CODE_VERSION === remote.codeVersion)
-  // 不同步则盐场/蟠桃会弹「客户端数据异常」。
+  const localVers = window._CCSettings.bundleVers || (window._CCSettings.bundleVers = {})
+  const localInternal = localVers.internal || 'a0340'
+  Object.keys(bundleVers).forEach(function (name) {
+    if (name === 'internal' || name === 'codeVersion' || name === 'COMMIT_ID') return
+    localVers[name] = bundleVers[name]
+  })
+  localVers.internal = localInternal
+  const identCode = typeof CODE_VERSION !== 'undefined' && CODE_VERSION ? String(CODE_VERSION) : '1.90.2'
+  localVers.codeVersion = identCode
+  localVers.COMMIT_ID = '503e66bc'
+  window.__xyzwActivityVers = Object.assign({}, localVers)
   try {
     const body = settingsObj && (settingsObj.body || settingsObj)
-    if (bundleVers && bundleVers.codeVersion) {
-      if (typeof globalThis !== 'undefined') {
-        globalThis.CODE_VERSION = String(bundleVers.codeVersion)
-        if (typeof globalThis.GAME_VERSION === 'string') {
-          globalThis.GAME_VERSION = String(bundleVers.codeVersion) + '-wx'
-        }
-      }
-      if (typeof window !== 'undefined') {
-        window.CODE_VERSION = String(bundleVers.codeVersion)
-      }
-    }
-    if (body && body.isLast != null) {
-      window.__xyzwManifestIsLast = !!body.isLast
-    }
     if (body && body.battleVersion != null) {
       window.__xyzwManifestBattleVersion = body.battleVersion
     }
   } catch (e) {}
   console.log('[remoteAssets] 远程版本已拉取', {
-    launcher: bundleVers.launcher,
-    game: bundleVers.game,
-    COMMIT_ID: bundleVers.COMMIT_ID,
-    codeVersion: bundleVers.codeVersion,
-    syncedCODE_VERSION: (typeof CODE_VERSION !== 'undefined' ? CODE_VERSION : null),
-    isLast: window.__xyzwManifestIsLast,
-    battleVersion: window.__xyzwManifestBattleVersion
+    bundles: Object.keys(localVers).length,
+    advancedMap: localVers.AdvancedMap_01 || '',
+    launcher: localVers.launcher,
+    game: localVers.game,
+    internal: localVers.internal,
+    CODE_VERSION: identCode,
+    GAME_VERSION: typeof GAME_VERSION !== 'undefined' ? GAME_VERSION : ''
   })
+}
+
+window.__xyzwKeepActivityBundles = function () {
+  const src = window.__xyzwActivityVers
+  if (!src) return
+  const targets = []
+  if (window._CCSettings && window._CCSettings.bundleVers) targets.push(window._CCSettings.bundleVers)
+  const downloader = window.cc && cc.assetManager && cc.assetManager.downloader
+  if (downloader) {
+    if (!downloader.bundleVers) downloader.bundleVers = {}
+    targets.push(downloader.bundleVers)
+  }
+  targets.forEach(function (bv) {
+    Object.keys(src).forEach(function (name) {
+      if (name === 'internal') return
+      if (!bv[name]) bv[name] = src[name]
+    })
+    if (bv.internal && bv.internal !== 'a0340') bv.internal = 'a0340'
+  })
+  try {
+    const am = window.cc && cc.assetManager
+    const cur = am && am.loadBundle
+    if (cur && am.__xyzwLoadBundle) {
+      const text = Function.prototype.toString.call(cur)
+      if (text.length < 40) am.loadBundle = am.__xyzwLoadBundle
+    }
+  } catch (e) {}
 }
 
 window.ensureBundleVers = async function () {
@@ -442,6 +465,9 @@ window.installRemoteAssetLoader = function () {
   }
 
   const downloader = cc.assetManager.downloader
+  if (!cc.assetManager.__xyzwLoadBundle && typeof cc.assetManager.loadBundle === 'function') {
+    cc.assetManager.__xyzwLoadBundle = cc.assetManager.loadBundle.bind(cc.assetManager)
+  }
   if (downloader.__remoteAssetLoaderInstalled) {
     return
   }
@@ -699,6 +725,7 @@ window.boot = async function () {
     remoteBundles: settings.remoteBundles,
     server: settings.server
   })
+  if (window.__xyzwKeepActivityBundles) window.__xyzwKeepActivityBundles()
 
   var bundleRoot = [INTERNAL]
   settings.hasResourcesBundle && bundleRoot.push(RESOURCES)
