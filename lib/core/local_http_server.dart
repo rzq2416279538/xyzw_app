@@ -273,7 +273,14 @@ Future<void> _send(
   response.headers.set(HttpHeaders.contentTypeHeader, mime);
   response.headers.set('Access-Control-Allow-Origin', '*');
   response.headers.set(HttpHeaders.etagHeader, etag);
+  final bootstrap = path.endsWith('/settings.da7ef.js') ||
+      path.endsWith('/main.2a00e.js') ||
+      path.endsWith('/game-defines.a175e.js') ||
+      path.endsWith('/patch.js') ||
+      path.endsWith('/hsdk-mock.js') ||
+      path.endsWith('/cocos-bundle-patch.js');
   final noStore = html ||
+      bootstrap ||
       path.startsWith('/__xyzw/bin/') ||
       path.contains('/userscripts/') ||
       path.endsWith('/xyzw-gm-shim.js');

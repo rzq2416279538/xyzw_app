@@ -313,6 +313,10 @@ window.convertAssets = function (url) {
   if (typeof url != 'string') {
     return url
   }
+  const remoteInternal = url.indexOf('/remote/internal/')
+  if (remoteInternal >= 0) {
+    return 'assets/internal/' + url.slice(remoteInternal + '/remote/internal/'.length)
+  }
   if (!url.startsWith('assets/') || url.startsWith('assets/internal')) {
     return url
   }
@@ -335,12 +339,33 @@ window.loadJscAndDecode = async function (url, callback) {
   const jsCodeData = xxtea.decrypt(uint8Data, xxtea.toBytes('0Aed5E79bbEa69f8'))
   const decoder = new TextDecoder();
   let jsCode = decoder.decode(jsCodeData)
-  
+  let nCode = 0
+  let nAudit = 0
+  let nVers = 0
+
+  // launcher 的 version-ext 会把 CODE_VERSION 改成资源包号 2.48.2，登录清单仍是 1.90.2。
+  jsCode = jsCode.replace(/globalThis\.CODE_VERSION="2\.48\.2",/g, function () {
+    nCode++
+    return ''
+  })
+  // 非 iOS 真机且审核开关打开时，主界面右侧活动列会被整列隐藏。
+  jsCode = jsCode.replace(
+    /[A-Za-z]\.PlatformManager\.instance\.checkSwitch\([A-Za-z]\.SwitchId\.CHECK_AUDIT\)&&![A-Za-z]\.PlatformManager\.instance\.isIosAndNative/g,
+    function () {
+      nAudit++
+      return '!1'
+    }
+  )
+  // H5 会跳过把清单里的包版本写进 ResourceManager。
+  jsCode = jsCode.replace(/"web"!==PLATFORM&&![a-z]\.instance\.isH5/g, function () {
+    nVers++
+    return '"web"!==PLATFORM'
+  })
   // 删除 launcher 中禁用 loadAny 的代码
   jsCode = jsCode.replace(/cc\.assetManager\.loadAny=function\(\)\{\},?/g, '');
   // 删除 game 中禁用 loadBundle 的代码 (isH5 判断)
   jsCode = jsCode.replace(/[a-zA-Z]\.PlatformManager\.instance\.isH5&&\(cc\.assetManager\.loadBundle=function\(\)\{\}\),?/g, '');
-  console.log('[loadDecodeJSC] 已删除H5禁用代码');
+  console.log('[loadDecodeJSC] patch', 'code', nCode, 'audit', nAudit, 'bundleVers', nVers);
   
   callback(jsCode)
 }
@@ -364,9 +389,8 @@ window.parseRemoteBundleVers = function (settingsObj) {
 }
 
 window.loadRemoteBundleVers = async function () {
-  // 1.90.2-h5web 的登录清单只有 codeVersion/COMMIT_ID，没有盐场包。
-  // 活动包在 0.32.0-android 这份清单里（约 1300 条，含 AdvancedMap_01），按需从 CDN 拉。
-  const manifestUrl = `https://xxz-xyzw.hortorgames.com/login/manifest?platform=hortor&version=0.32.0-android`
+  // 登录仍用 1.90.2-h5web。活动界面在更新的 0.36.0-android 清单里（code 2.50.3，含五周年等新活动包）。
+  const manifestUrl = `https://xxz-xyzw.hortorgames.com/login/manifest?platform=hortor&version=0.36.0-android`
   console.log('[remoteAssets] POST manifest', manifestUrl)
 
   const settingsRes = await fetch(
@@ -398,13 +422,15 @@ window.loadRemoteBundleVers = async function () {
   const localVers = window._CCSettings.bundleVers || (window._CCSettings.bundleVers = {})
   const localInternal = localVers.internal || 'a0340'
   Object.keys(bundleVers).forEach(function (name) {
-    if (name === 'internal' || name === 'codeVersion' || name === 'COMMIT_ID') return
+    if (name === 'internal') return
     localVers[name] = bundleVers[name]
   })
   localVers.internal = localInternal
-  const identCode = typeof CODE_VERSION !== 'undefined' && CODE_VERSION ? String(CODE_VERSION) : '1.90.2'
-  localVers.codeVersion = identCode
-  localVers.COMMIT_ID = '503e66bc'
+  if (bundleVers.codeVersion) {
+    localVers.codeVersion = String(bundleVers.codeVersion)
+    // 登录清单仍是 1.90.2-h5web。活动界面认的是这份资源号，旧启动器写不进去。
+    try { globalThis.CODE_VERSION = localVers.codeVersion } catch (eCode) {}
+  }
   window.__xyzwActivityVers = Object.assign({}, localVers)
   try {
     const body = settingsObj && (settingsObj.body || settingsObj)
@@ -418,12 +444,23 @@ window.loadRemoteBundleVers = async function () {
     launcher: localVers.launcher,
     game: localVers.game,
     internal: localVers.internal,
-    CODE_VERSION: identCode,
+    CODE_VERSION: localVers.codeVersion || '',
     GAME_VERSION: typeof GAME_VERSION !== 'undefined' ? GAME_VERSION : ''
   })
 }
 
+window.__xyzwBundleUrl = function (nameOrUrl) {
+  const raw = String(nameOrUrl || '')
+  const bundleName = raw.split('?')[0].split('/').filter(Boolean).pop()
+  const vers = window.__xyzwActivityVers || {}
+  if (!bundleName || bundleName === 'internal' || !vers[bundleName]) return nameOrUrl
+  return 'https://xxz-xyzw-res.hortorgames.com/remote/' + bundleName
+}
+
 window.__xyzwKeepActivityBundles = function () {
+  if (!window.__xyzwActivityVers && window._CCSettings && window._CCSettings.bundleVers) {
+    window.__xyzwActivityVers = window._CCSettings.bundleVers
+  }
   const src = window.__xyzwActivityVers
   if (!src) return
   const targets = []
@@ -433,20 +470,62 @@ window.__xyzwKeepActivityBundles = function () {
     if (!downloader.bundleVers) downloader.bundleVers = {}
     targets.push(downloader.bundleVers)
   }
-  targets.forEach(function (bv) {
+    targets.forEach(function (bv) {
     Object.keys(src).forEach(function (name) {
-      if (name === 'internal') return
-      if (!bv[name]) bv[name] = src[name]
+      if (name === 'internal' || name === 'config' || name === 'codeVersion') return
+      bv[name] = src[name]
     })
+    if (!bv.config && src.config) bv.config = src.config
     if (bv.internal && bv.internal !== 'a0340') bv.internal = 'a0340'
   })
   try {
-    const am = window.cc && cc.assetManager
-    const cur = am && am.loadBundle
-    if (cur && am.__xyzwLoadBundle) {
-      const text = Function.prototype.toString.call(cur)
-      if (text.length < 40) am.loadBundle = am.__xyzwLoadBundle
+    const req = window.__require
+    if (typeof req === 'function') {
+      const mod = req('ResourceManager')
+      const inst = mod && mod.ResourceManager && mod.ResourceManager.instance
+      if (inst) {
+        if (!inst.bundleVersions || typeof inst.bundleVersions !== 'object') inst.bundleVersions = {}
+        Object.keys(src).forEach(function (name) {
+          if (name === 'internal' || name === 'config' || name === 'codeVersion') return
+          inst.bundleVersions[name] = src[name]
+        })
+        if (!inst.bundleVersions.config && src.config) inst.bundleVersions.config = src.config
+      }
     }
+  } catch (eRm) {}
+  try {
+    const am = window.cc && cc.assetManager
+    if (!am) return
+    if (am.__xyzwLoadAny && Function.prototype.toString.call(am.loadAny).length < 40) {
+      am.loadAny = am.__xyzwLoadAny
+    }
+    const cur = am.loadBundle
+    const broken = !cur || !cur.__xyzwCdn || Function.prototype.toString.call(cur).length < 40
+    if (!broken) return
+    const orig = am.__xyzwLoadBundle || cur
+    if (!orig) return
+    const wrapped = function (nameOrUrl, options, onComplete) {
+      if (typeof options === 'function') {
+        onComplete = options
+        options = null
+      }
+      const raw = String(nameOrUrl || '')
+      const bundleName = raw.split('?')[0].split('/').filter(Boolean).pop()
+      if (bundleName === 'internal') {
+        return orig.call(am, 'internal', options, onComplete)
+      }
+      const hash = src[bundleName]
+      if (hash) {
+        // config 留给 dataBundleVer。其余包一律用最新清单，避免启动器先吃到内嵌旧哈希。
+        if (bundleName !== 'config' || !options || !options.version) {
+          options = Object.assign({}, options || {}, { version: hash })
+        }
+        if (!/^\w+:\/\//.test(raw)) nameOrUrl = 'https://xxz-xyzw-res.hortorgames.com/remote/' + bundleName
+      }
+      return orig.call(am, nameOrUrl, options, onComplete)
+    }
+    wrapped.__xyzwCdn = true
+    am.loadBundle = wrapped
   } catch (e) {}
 }
 
@@ -467,6 +546,9 @@ window.installRemoteAssetLoader = function () {
   const downloader = cc.assetManager.downloader
   if (!cc.assetManager.__xyzwLoadBundle && typeof cc.assetManager.loadBundle === 'function') {
     cc.assetManager.__xyzwLoadBundle = cc.assetManager.loadBundle.bind(cc.assetManager)
+  }
+  if (!cc.assetManager.__xyzwLoadAny && typeof cc.assetManager.loadAny === 'function') {
+    cc.assetManager.__xyzwLoadAny = cc.assetManager.loadAny.bind(cc.assetManager)
   }
   if (downloader.__remoteAssetLoaderInstalled) {
     return
@@ -562,14 +644,26 @@ window.installRemoteAssetLoader = function () {
   }
 
   function downloadBundle(url, options, onComplete) {
-    const bundleName = cc.path.basename(url)
-    const base = absoluteUrlRE.test(url) ? url : 'assets/' + bundleName
-    const remoteBase = toRemoteUrl(base)
-    const version = options.version || (downloader.bundleVers && downloader.bundleVers[bundleName])
-    if (!version && bundleName !== cc.AssetManager.BuiltinBundleName.INTERNAL) {
+    const bundleName = cc.path.basename(String(url).split('?')[0])
+    const isInternal =
+      bundleName === 'internal' ||
+      bundleName === cc.AssetManager.BuiltinBundleName.INTERNAL
+    const activityHash = window.__xyzwActivityVers && window.__xyzwActivityVers[bundleName]
+    const passed = options && options.version
+    const stored = downloader.bundleVers && downloader.bundleVers[bundleName]
+    const version = isInternal
+      ? 'a0340'
+      : bundleName === 'config' && passed
+        ? passed
+        : activityHash || passed || stored
+    if (!version && !isInternal) {
       onComplete && onComplete(new Error('[remoteAssets] missing bundle version: ' + bundleName))
       return
     }
+    const base = isInternal
+      ? 'assets/internal'
+      : 'https://xxz-xyzw-res.hortorgames.com/remote/' + bundleName
+    const remoteBase = base
     const versionPart = version ? version + '.' : ''
     let finished = 0
     let error = null
@@ -612,6 +706,9 @@ window.installRemoteAssetLoader = function () {
 }
 
 window.boot = async function () {
+  if (window._CCSettings && window._CCSettings.bundleVers) {
+    window.__xyzwActivityVers = Object.assign({}, window._CCSettings.bundleVers)
+  }
   try {
     await window.ensureBundleVers()
   } catch (err) {

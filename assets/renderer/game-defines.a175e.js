@@ -10,8 +10,7 @@ gt.CDN = 'https://xxz-xyzw-res.hortorgames.com'
 gt.SERVER = 'https://xxz-xyzw.hortorgames.com'
 gt.GAME_NAME = '咸鱼之王'
 gt.GAME_ID = 'xyzw_mix'
-// 能进盐场的网页端报 1.90.2-h5web，登录清单 codeVersion 也是 1.90.2。
-// 活动包哈希另从 0.32.0-android 清单合并，不要把资源包号 2.48.2 写回这里。
+// 登录清单用 1.90.2-h5web。活动包在启动后改用 0.36.0-android（code 2.50.3）。
 gt.GAME_VERSION = '1.90.2-h5web'
 gt.CODE_VERSION = '1.90.2'
 gt.COMMIT_ID = ''
