@@ -14,7 +14,7 @@ class RendererCache {
 
   static const _assetRoot = 'assets/renderer';
   // 改动 renderer 下任何文件都要升这个版本号，否则旧缓存不会被替换
-  static const _stampName = '.copied_v10';
+  static const _stampName = '.copied_v11';
 
   static Future<Directory> ensure() async {
     final support = await getApplicationSupportDirectory();
@@ -101,6 +101,7 @@ class RendererCache {
       '.copied_v7',
       '.copied_v8',
       '.copied_v9',
+      '.copied_v10',
       _stampName,
     ]) {
       final f = File('${dir.path}${Platform.pathSeparator}$name');

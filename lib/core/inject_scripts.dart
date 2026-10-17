@@ -394,8 +394,12 @@ class InjectScripts {
       gameVersion: (typeof GAME_VERSION !== 'undefined' ? String(GAME_VERSION) : ''),
       remoteCodeVersion: '',
       remoteCommit: '',
+      gameId: (typeof GAME_ID !== 'undefined' ? String(GAME_ID) : ''),
       manifestIsLast: window.__xyzwManifestIsLast,
       manifestBattleVersion: window.__xyzwManifestBattleVersion,
+      buildTime: window.__xyzwBuildTime || '',
+      rawReject: window.__xyzwRawReject,
+      rawFixYan: window.__xyzwRawFixYan,
       switchRejectStore: (window.__switchStore && window.__switchStore.RejectLowVersionPvP),
       switchRejectGame: null,
       switchFixYanChang: null,
@@ -412,6 +416,10 @@ class InjectScripts {
       if (bv) {
         snap.remoteCodeVersion = bv.codeVersion || '';
         snap.remoteCommit = bv.COMMIT_ID || '';
+        snap.bundleMain = bv.main || '';
+        snap.bundleGame = bv.game || '';
+        snap.bundleInternal = bv.internal || '';
+        snap.bundleMap = bv.AdvancedMap_01 || '';
       }
     } catch (e0) {}
     try {
@@ -558,47 +566,116 @@ class InjectScripts {
       }
     } catch (e3) {}
   }
+  function hookOneShowTip(mod, label){
+    if (!mod) return false;
+    var fn = mod.SHOW_TIP || (mod.default && mod.default.SHOW_TIP);
+    if (typeof fn !== 'function' || fn.__xyzwTipPatched) return false;
+    var orig = fn;
+    var wrapped = function(msg){
+      try {
+        _showTipHits++;
+        var s = (msg == null) ? '' : String(msg);
+        log('SHOW_TIP', label, s.slice(0, 200));
+        snapshot('SHOW_TIP:'+s.slice(0,80));
+        post({ type: 'pvpDiag', level: 'W', event: 'SHOW_TIP', message: label+' '+s.slice(0, 300) });
+        if (/客户端数据异常|官方最新客户端|C_Battle_Tips|版本过低/.test(s)) {
+          warn('拦截异常提示', s.slice(0, 120));
+          post({
+            type: 'clientAnomaly',
+            kind: 'SHOW_TIP',
+            key: '客户端数据异常',
+            text: s.slice(0, 500),
+            critical: true,
+            fingerprint: { via: 'SHOW_TIP', module: label, pvp: true }
+          });
+          return;
+        }
+      } catch (e0) {}
+      return orig.apply(this, arguments);
+    };
+    wrapped.__xyzwTipPatched = true;
+    if (mod.SHOW_TIP) mod.SHOW_TIP = wrapped;
+    if (mod.default && mod.default.SHOW_TIP) mod.default.SHOW_TIP = wrapped;
+    _patchFlags.showTipHook = true;
+    log('patched SHOW_TIP via', label);
+    return true;
+  }
   function hookShowTip(){
     try {
-      // 多模块导出 SHOW_TIP；尽量钩常见名
-      var names = ['UIHelper', 'TipManager', 'MessageManager'];
+      var names = ['UIHelper', 'TipManager', 'TipsManager', 'MessageManager', 'NoticeManager', 'ToastManager'];
       for (var i = 0; i < names.length; i++) {
-        var mod = tryRequire(names[i]);
-        if (!mod) continue;
-        var fn = mod.SHOW_TIP || (mod.default && mod.default.SHOW_TIP);
-        if (typeof fn !== 'function' || fn.__xyzwTipPatched) continue;
-        var orig = fn;
-        var wrapped = function(msg){
+        hookOneShowTip(tryRequire(names[i]), names[i]);
+      }
+      var cache = window.__require && window.__require.cache;
+      if (cache) {
+        for (var ck in cache) {
           try {
-            _showTipHits++;
-            var s = (msg == null) ? '' : String(msg);
-            log('SHOW_TIP', s.slice(0, 200));
-            snapshot('SHOW_TIP:'+s.slice(0,80));
-            post({ type: 'pvpDiag', level: 'W', event: 'SHOW_TIP', message: s.slice(0, 300) });
-            // 盐场异常文案：记录后吞掉，避免只弹窗无日志
-            if (/客户端数据异常|官方最新客户端|C_Battle_Tips|版本过低/.test(s)) {
-              warn('拦截异常提示', s.slice(0, 120));
-              post({
-                type: 'clientAnomaly',
-                kind: 'SHOW_TIP',
-                key: '客户端数据异常',
-                text: s.slice(0, 500),
-                critical: true,
-                fingerprint: { via: 'SHOW_TIP', pvp: true }
-              });
-              return;
+            var exp = cache[ck] && cache[ck].exports;
+            if (exp && (typeof exp.SHOW_TIP === 'function' || (exp.default && typeof exp.default.SHOW_TIP === 'function'))) {
+              hookOneShowTip(exp, ck);
             }
-          } catch (e0) {}
-          return orig.apply(this, arguments);
-        };
-        wrapped.__xyzwTipPatched = true;
-        if (mod.SHOW_TIP) mod.SHOW_TIP = wrapped;
-        if (mod.default && mod.default.SHOW_TIP) mod.default.SHOW_TIP = wrapped;
-        _patchFlags.showTipHook = true;
-        log('patched SHOW_TIP via', names[i]);
+          } catch (eC) {}
+        }
       }
     } catch (e) {}
-    // 全局兜底：监听 fgui / 常见 tip 通道较难；再钩 console 已有
+  }
+  // 不进盐场，用当前版本号、资源表和开关把关口演一遍，结果搜 PVP_SIM。
+  function simulateSaltGate(reason){
+    try {
+      var bv = (window._CCSettings && window._CCSettings.bundleVers) || {};
+      var local = (typeof CODE_VERSION !== 'undefined') ? String(CODE_VERSION) : '';
+      var gameVer = (typeof GAME_VERSION !== 'undefined') ? String(GAME_VERSION) : '';
+      var gameId = (typeof GAME_ID !== 'undefined') ? String(GAME_ID) : '';
+      var con = readConsole();
+      var battle = readBattle();
+      var reasons = [];
+      if (!bv.AdvancedMap_01) reasons.push('盐场地图版本表未加载');
+      if (!bv.main) reasons.push('main包哈希为空');
+      if (local !== '0.32.0') reasons.push('CODE_VERSION='+local);
+      if (gameId && gameId !== 'xyzwapp') reasons.push('GAME_ID='+gameId);
+      if (con && con.isLowerVersion === true) reasons.push('isLowerVersion=true');
+      var patchedReject = null;
+      var patchedFix = null;
+      try {
+        var PM = tryRequire('PlatformManager');
+        var pinst = PM && (PM.PlatformManager && PM.PlatformManager.instance || PM.instance);
+        if (pinst && typeof pinst.checkSwitch === 'function') {
+          patchedReject = !!pinst.checkSwitch('RejectLowVersionPvP');
+          patchedFix = !!pinst.checkSwitch('FixYanChangClickEvent');
+        }
+      } catch (eP) {}
+      if (patchedReject === true) reasons.push('客户端查询仍拒绝低版本');
+      if (patchedFix === false) reasons.push('盐场点人开关仍是关');
+      if (window.__xyzwBuildTime && /2024/.test(String(window.__xyzwBuildTime))) {
+        reasons.push('构建时间仍是2024:'+window.__xyzwBuildTime);
+      }
+      var verdict = reasons.length ? 'fail' : 'pass';
+      var line = {
+        reason: reason,
+        verdict: verdict,
+        reasons: reasons,
+        CODE_VERSION: local,
+        GAME_VERSION: gameVer,
+        GAME_ID: gameId,
+        bundleMain: bv.main || '',
+        bundleGame: bv.game || '',
+        bundleInternal: bv.internal || '',
+        bundleMap: bv.AdvancedMap_01 || '',
+        buildTime: window.__xyzwBuildTime || '',
+        rawReject: window.__xyzwRawReject,
+        rawFixYan: window.__xyzwRawFixYan,
+        patchedReject: patchedReject,
+        patchedFix: patchedFix,
+        isLowerVersion: con && con.isLowerVersion,
+        checkPatched: !!(battle && battle.checkPatched),
+        showTipHook: !!_patchFlags.showTipHook
+      };
+      var json = JSON.stringify(line);
+      console.log('[咸强之王][PVP_SIM]', verdict, json);
+      post({ type: 'pvpDiag', level: verdict === 'pass' ? 'I' : 'W', event: 'PVP_SIM', message: verdict, summary: line });
+    } catch (eSim) {
+      log('PVP_SIM error', eSim && eSim.message || eSim);
+    }
   }
   // 暴露给异常侦测：弹窗时附带快照
   window.__xyzwPvpSnapshot = function(reason){ return snapshot(reason || 'external'); };
@@ -745,7 +822,14 @@ class InjectScripts {
       var hw = function(){
         try {
           var text = Array.prototype.slice.call(arguments).map(String).join(' ');
-          if (/RejectLowVersionPvP|FixYanChangClickEvent|isLast,\s*codeVersion|BATTLE_VERSION|GameVersionMisMatch|RemoteCodeMisMatch|CODE_GameVer_Lower|C_Battle_Tips/i.test(text)) {
+          var sm = text.match(/开关(RejectLowVersionPvP|FixYanChangClickEvent),?\s*(true|false)/i);
+          if (sm) {
+            if (sm[1].indexOf('Reject') >= 0) window.__xyzwRawReject = sm[2] === 'true';
+            else window.__xyzwRawFixYan = sm[2] === 'true';
+          }
+          var bm = text.match(/build time:?\s*,?\s*(.+)/i);
+          if (bm) window.__xyzwBuildTime = bm[1].slice(0, 80);
+          if (/RejectLowVersionPvP|FixYanChangClickEvent|isLast,\s*codeVersion|BATTLE_VERSION|GameVersionMisMatch|RemoteCodeMisMatch|CODE_GameVer_Lower|C_Battle_Tips|build time/i.test(text)) {
             patchHortorSwitches();
             snapshot('warn:'+text.slice(0,120));
           }
@@ -766,6 +850,7 @@ class InjectScripts {
     if (n === 0 || n === 5 || n === 15 || n === 30 || n % 20 === 0) {
       snapshot('tick_'+n);
     }
+    if (n === 20 || n === 60) simulateSaltGate('tick_'+n);
     if (n < 120) setTimeout(function(){ tick(n + 1); }, n < 20 ? 500 : 2000);
   }
   forceRejectOff();

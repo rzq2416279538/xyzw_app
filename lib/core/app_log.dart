@@ -133,7 +133,8 @@ class AppLog {
     buf.writeln('导出时间: ${DateTime.now().toIso8601String()}');
     buf.writeln('平台: ${Platform.operatingSystem} ${Platform.operatingSystemVersion}');
     buf.writeln('--- 盐场/蟠桃问题请搜这些关键字 ---');
-    buf.writeln('PVP_SNAP | PVP_VER | CHECK_PVP | RejectLowVersionPvP | codeVersion');
+    buf.writeln('PVP_SNAP | PVP_SIM | PVP_VER | CHECK_PVP | RejectLowVersionPvP | codeVersion');
+    buf.writeln('PVP_SIM verdict=pass 表示版本表和客户端关口已对齐；fail 的 reasons 是仍会异常的原因');
     buf.writeln('客户端数据异常 | 官方最新客户端 | C_Battle_Tips | isLowerVersion | codeMatch');
     buf.writeln('风险位 | GameVersionMisMatch | RemoteCodeMisMatch | fingerprint');
     buf.writeln('关键字段说明: localCODE_VERSION vs remoteCodeVersion 应对齐;');

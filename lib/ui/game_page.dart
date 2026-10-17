@@ -535,6 +535,7 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
         final pvp = text.contains('PVP_DIAG') ||
             text.contains('PVP_VER') ||
             text.contains('PVP_SNAP') ||
+            text.contains('PVP_SIM') ||
             text.contains('CHECK_PVP') ||
             text.contains('SUSPECT_MANIFEST_PIN') ||
             text.contains('RejectLowVersionPvP') ||
