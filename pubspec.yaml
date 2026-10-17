@@ -43,7 +43,6 @@ flutter:
     - assets/renderer/splash.85cfd.png
     - assets/renderer/favicon.8de18.ico
     - assets/renderer/src/settings.da7ef.js
-    - assets/renderer/vers.110083b506f7d1f4523681620aee8f5d.js
     - assets/renderer/src/assets/launcher/common/libs/platform/hortor/HSDK.turnpass.min.js
     - assets/renderer/assets/internal/config.json
     - assets/renderer/assets/internal/index.js

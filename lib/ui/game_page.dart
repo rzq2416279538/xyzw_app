@@ -100,6 +100,7 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
   var _httpSuspect = false;
   /// 进后台时是否正在游玩（防止 visible 被误改后丢掉会话）
   var _playingWhenBackgrounded = false;
+  var _saltSimBusy = false;
 
   @override
   void initState() {
@@ -536,6 +537,7 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
             text.contains('PVP_VER') ||
             text.contains('PVP_SNAP') ||
             text.contains('PVP_SIM') ||
+            text.contains('SALT_SIM') ||
             text.contains('CHECK_PVP') ||
             text.contains('SUSPECT_MANIFEST_PIN') ||
             text.contains('RejectLowVersionPvP') ||
@@ -707,6 +709,100 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
       return WebViewController.fromPlatformCreationParams(params);
     }
     return WebViewController();
+  }
+
+  String _formatSaltSim(Object? raw) {
+    var text = raw?.toString() ?? '';
+    if (text.startsWith('"') && text.endsWith('"')) {
+      try {
+        final inner = jsonDecode(text);
+        if (inner is String) text = inner;
+      } catch (_) {}
+    }
+    Map<String, dynamic>? map;
+    try {
+      final decoded = jsonDecode(text);
+      if (decoded is Map) map = Map<String, dynamic>.from(decoded);
+    } catch (_) {}
+    if (map == null) return text.isEmpty ? '没有返回' : text;
+    final buf = StringBuffer();
+    final anomaly = map['anomaly'] == true;
+    buf.writeln(anomaly ? '盐场关口返回了异常' : '这次没有异常文案');
+    final reason = map['reason'] as String? ?? '';
+    if (reason.isNotEmpty) buf.writeln(reason);
+    buf.writeln('RejectLowVersionPvP=${map['rejectUsed']}');
+    buf.writeln('isLowerVersion=${map['isLower']}');
+    buf.writeln('CODE_VERSION=${map['code']} 清单=${map['remote']}');
+    final bt = map['battleType'];
+    buf.writeln('battleType=${bt ?? '未找到，用了 0'}');
+    final calls = map['calls'];
+    if (calls is List) {
+      for (final item in calls) {
+        if (item is! Map) continue;
+        buf.writeln('---');
+        buf.writeln('函数 ${item['name']}');
+        buf.writeln('返回 ${item['ret']}');
+        final tips = item['tips'];
+        if (tips is List && tips.isNotEmpty) {
+          buf.writeln('提示 ${tips.join(' | ')}');
+        } else {
+          buf.writeln('提示 （无）');
+        }
+      }
+    }
+    return buf.toString().trimRight();
+  }
+
+  Future<void> _runSaltSim() async {
+    final session = _sessions[_activeId];
+    if (session == null || _saltSimBusy) return;
+    setState(() => _saltSimBusy = true);
+    String text;
+    try {
+      final raw = await session.controller.runJavaScriptReturningResult(r'''
+(function(){
+  try {
+    if (typeof window.__xyzwRunSaltSim !== 'function') {
+      return JSON.stringify({ anomaly:false, reason:'模拟函数未注入，重进游戏后再点' });
+    }
+    return JSON.stringify(window.__xyzwRunSaltSim());
+  } catch (e) {
+    return JSON.stringify({ anomaly:false, reason: String(e && e.message || e) });
+  }
+})()
+''');
+      text = _formatSaltSim(raw);
+      AppLog.w('pvp', '[$_activeId] SALT_SIM $text');
+    } catch (e) {
+      text = '模拟调用失败\n$e';
+      AppLog.w('pvp', 'SALT_SIM 失败 $e');
+    }
+    if (!mounted) return;
+    setState(() => _saltSimBusy = false);
+    await showCupertinoDialog<void>(
+      context: context,
+      builder: (ctx) {
+        return CupertinoAlertDialog(
+          title: const Text('盐场模拟'),
+          content: SizedBox(
+            height: 280,
+            child: SingleChildScrollView(
+              child: Text(
+                text,
+                textAlign: TextAlign.left,
+                style: const TextStyle(fontSize: 13, height: 1.4),
+              ),
+            ),
+          ),
+          actions: [
+            CupertinoDialogAction(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('关闭'),
+            ),
+          ],
+        );
+      },
+    );
   }
 
   Future<void> _probeBinState(
@@ -1436,6 +1532,21 @@ class GamePageState extends State<GamePage> with WidgetsBindingObserver {
                             _armReadyWatch(_activeId);
                             await s.controller.reload();
                           },
+                        ),
+                        CupertinoButton(
+                          padding: const EdgeInsets.symmetric(horizontal: 6),
+                          minimumSize: Size.zero,
+                          onPressed: (_bootError != null || _saltSimBusy)
+                              ? null
+                              : _runSaltSim,
+                          child: Text(
+                            _saltSimBusy ? '…' : '模拟',
+                            style: const TextStyle(
+                              fontSize: 16,
+                              color: AppTheme.blue,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
                         ),
                         const SizedBox(width: 4),
                       ],

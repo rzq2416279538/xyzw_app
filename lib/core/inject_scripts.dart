@@ -454,6 +454,7 @@ class InjectScripts {
     return snap;
   }
   function forceKey(name){
+    if (window.__xyzwSimRaw) return null;
     var k = String(name || '');
     if (FORCE_OFF[k] || /RejectLowVersionPvP/i.test(k)) return false;
     if (FORCE_ON[k] || /FixYanChangClickEvent/i.test(k)) return true;
@@ -576,6 +577,10 @@ class InjectScripts {
         _showTipHits++;
         var s = (msg == null) ? '' : String(msg);
         log('SHOW_TIP', label, s.slice(0, 200));
+        if (window.__xyzwSimRaw) {
+          if (!window.__xyzwSimTips) window.__xyzwSimTips = [];
+          window.__xyzwSimTips.push(s.slice(0, 300));
+        }
         snapshot('SHOW_TIP:'+s.slice(0,80));
         post({ type: 'pvpDiag', level: 'W', event: 'SHOW_TIP', message: label+' '+s.slice(0, 300) });
         if (/客户端数据异常|官方最新客户端|C_Battle_Tips|版本过低/.test(s)) {
@@ -737,6 +742,13 @@ class InjectScripts {
       var CM = tryRequire('ConsoleManager');
       var inst = CM && (CM.ConsoleManager && CM.ConsoleManager.instance || CM.instance);
       if (inst) {
+        if (inst.__xyzwLowerBefore === undefined) {
+          try { inst.__xyzwLowerBefore = !!inst.isLowerVersion; } catch (eL0) { inst.__xyzwLowerBefore = false; }
+          try {
+            inst.__xyzwLowerDesc = Object.getOwnPropertyDescriptor(inst, 'isLowerVersion')
+              || Object.getOwnPropertyDescriptor(Object.getPrototypeOf(inst), 'isLowerVersion');
+          } catch (eL1) {}
+        }
         inst._isLowerVersion = false;
         if (typeof inst.checkGameVer === 'function' && !inst.checkGameVer.__xyzwPatched) {
           var old = inst.checkGameVer.bind(inst);
@@ -747,6 +759,7 @@ class InjectScripts {
             snapshot('after_checkGameVer');
           };
           wrapped.__xyzwPatched = true;
+          wrapped.__xyzwOrig = old;
           inst.checkGameVer = wrapped;
           _patchFlags.consoleCheckGameVer = true;
           log('patched ConsoleManager.checkGameVer');
@@ -766,6 +779,7 @@ class InjectScripts {
     try {
       var BU = tryRequire('BattleUIManager');
       if (BU && typeof BU.CHECK_PVP_BATTLE_VERSION === 'function' && !BU.CHECK_PVP_BATTLE_VERSION.__xyzwPatched) {
+        var origCheck = BU.CHECK_PVP_BATTLE_VERSION;
         var wrappedCheck = function(battleType, showTip){
           _checkPvpHits++;
           var snap = snapshot('CHECK_PVP type='+battleType+' showTip='+showTip);
@@ -783,6 +797,7 @@ class InjectScripts {
           return true;
         };
         wrappedCheck.__xyzwPatched = true;
+        wrappedCheck.__xyzwOrig = origCheck;
         BU.CHECK_PVP_BATTLE_VERSION = wrappedCheck;
         _patchFlags.checkPvpBattle = true;
         log('patched CHECK_PVP_BATTLE_VERSION → log+bypass');
@@ -840,6 +855,229 @@ class InjectScripts {
       console.warn = hw;
     }
   } catch (eW) {}
+  function eachSwitchMap(fn){
+    try {
+      var PM = tryRequire('PlatformManager');
+      var inst = PM && (PM.PlatformManager && PM.PlatformManager.instance || PM.instance);
+      if (inst) {
+        fn(inst._config);
+        var plat = inst._platform;
+        if (plat) {
+          fn(plat._switchResult);
+          for (var pk in plat) {
+            try {
+              if (plat[pk] && plat[pk]._switchResult) fn(plat[pk]._switchResult);
+            } catch (eP) {}
+          }
+        }
+      }
+    } catch (e0) {}
+    try {
+      var HS = tryRequire('HortorSwitch');
+      var hInst = HS && (HS.HortorSwitch && HS.HortorSwitch.instance);
+      if (hInst) fn(hInst._switchResult);
+    } catch (e1) {}
+  }
+  function setReject(val){
+    eachSwitchMap(function(map){
+      if (!map || typeof map.set !== 'function') return;
+      try { map.set('RejectLowVersionPvP', val); } catch (e) {}
+    });
+    try {
+      if (window.__switchStore && typeof window.__switchStore === 'object') {
+        window.__switchStore.RejectLowVersionPvP = val ? 1 : 0;
+      }
+    } catch (e2) {}
+  }
+  function findSaltBattleType(){
+    var names = ['BattleType', 'EMBattleType', 'BattleConst'];
+    var re = /yan|salt|legion.?war|legionwar/i;
+    for (var i = 0; i < names.length; i++) {
+      var mod = tryRequire(names[i]);
+      if (!mod) continue;
+      var bag = mod[names[i]] || mod;
+      var keys = [];
+      try { keys = Object.keys(bag); } catch (e0) { continue; }
+      for (var k = 0; k < keys.length; k++) {
+        if (!re.test(keys[k])) continue;
+        var v = bag[keys[k]];
+        if (typeof v === 'number' || typeof v === 'string') {
+          return { name: names[i] + '.' + keys[k], value: v };
+        }
+      }
+    }
+    return null;
+  }
+  function findGateFns(){
+    var out = [];
+    var seen = [];
+    function add(fn, name){
+      if (typeof fn !== 'function' || seen.indexOf(fn) >= 0) return;
+      seen.push(fn);
+      var src = '';
+      try { src = Function.prototype.toString.call(fn); } catch (e0) {}
+      out.push({ name: name, fn: fn, src: src.slice(0, 320) });
+    }
+    function consider(fn, name){
+      if (typeof fn !== 'function') return;
+      var real = fn.__xyzwOrig || fn;
+      if (typeof real !== 'function' || real.__xyzwPatched) return;
+      var src = '';
+      try { src = Function.prototype.toString.call(real); } catch (e1) { return; }
+      var hitTip = /C_Battle_Tips|客户端数据异常/.test(src);
+      var hitGate = /CHECK_PVP|checkPvp|checkGameVer|BattleVersion/.test(name) &&
+        /RejectLowVersionPvP|isLowerVersion|C_Battle_Tips/.test(src);
+      if (!hitTip && !hitGate) return;
+      add(real, name);
+    }
+    try {
+      var BU = tryRequire('BattleUIManager');
+      var cur = BU && BU.CHECK_PVP_BATTLE_VERSION;
+      if (typeof cur === 'function') {
+        var real = cur.__xyzwOrig || (!cur.__xyzwPatched ? cur : null);
+        if (typeof real === 'function') add(real, 'BattleUIManager.CHECK_PVP_BATTLE_VERSION');
+      }
+    } catch (e2) {}
+    var cache = window.__require && window.__require.cache;
+    var n = 0;
+    if (cache) {
+      for (var ck in cache) {
+        if (out.length >= 4 || n > 2500) break;
+        var exp = cache[ck] && cache[ck].exports;
+        if (!exp || (typeof exp !== 'object' && typeof exp !== 'function')) continue;
+        var keys = [];
+        try { keys = Object.getOwnPropertyNames(exp); } catch (e3) { continue; }
+        for (var i = 0; i < keys.length; i++) {
+          n++;
+          if (n > 2500 || out.length >= 4) break;
+          var key = keys[i];
+          if (key === '__esModule' || key === 'constructor') continue;
+          try { consider(exp[key], ck + '.' + key); } catch (e4) {}
+        }
+      }
+    }
+    return out;
+  }
+  function restoreLowerGetter(inst){
+    if (!inst) return;
+    try { inst._isLowerVersion = false; } catch (e0) {}
+    try {
+      Object.defineProperty(inst, 'isLowerVersion', {
+        configurable: true,
+        enumerable: true,
+        get: function(){ return false; },
+        set: function(){}
+      });
+    } catch (e1) {}
+  }
+  function useRealLower(inst){
+    if (!inst) return;
+    try {
+      Object.defineProperty(inst, 'isLowerVersion', {
+        configurable: true,
+        enumerable: true,
+        get: function(){
+          var d = inst.__xyzwLowerDesc;
+          if (d && typeof d.get === 'function') {
+            try { return !!d.get.call(inst); } catch (e0) {}
+          }
+          return !!inst._isLowerVersion;
+        },
+        set: function(v){ try { inst._isLowerVersion = !!v; } catch (e1) {} }
+      });
+    } catch (e2) {}
+    try {
+      if (inst.__xyzwLowerBefore) inst._isLowerVersion = true;
+    } catch (e3) {}
+  }
+  // 按进盐场时的原始开关调用游戏自己的关口，截住提示文案。平时的放行补丁在调用后恢复。
+  window.__xyzwRunSaltSim = function(){
+    var report = {
+      anomaly: false,
+      calls: [],
+      battleType: null,
+      rejectUsed: null,
+      isLower: null,
+      code: (typeof CODE_VERSION !== 'undefined') ? String(CODE_VERSION) : '',
+      remote: window.__xyzwManifestCodeVersion || '',
+      reason: ''
+    };
+    try { hookShowTip(); } catch (eHook) {}
+    var gates = findGateFns();
+    if (!gates.length) {
+      report.reason = '盐场关口函数还没加载。进到游戏主界面后再点。这次没有异常返回。';
+      return report;
+    }
+    var bt = findSaltBattleType();
+    report.battleType = bt;
+    var battleValue = bt ? bt.value : 0;
+    var CM = tryRequire('ConsoleManager');
+    var cinst = CM && (CM.ConsoleManager && CM.ConsoleManager.instance || CM.instance);
+    var reject = (window.__xyzwRawReject === false) ? false : true;
+    report.rejectUsed = reject;
+    window.__xyzwSimTips = [];
+    window.__xyzwSimRaw = true;
+    try {
+      setReject(reject);
+      useRealLower(cinst);
+      if (cinst && cinst.checkGameVer && typeof cinst.checkGameVer.__xyzwOrig === 'function') {
+        try { cinst.checkGameVer.__xyzwOrig(); } catch (eCv) {}
+      }
+      try { report.isLower = !!(cinst && cinst.isLowerVersion); } catch (eL) { report.isLower = 'err'; }
+      for (var i = 0; i < gates.length; i++) {
+        window.__xyzwSimTips = [];
+        var ret = null;
+        var thrown = '';
+        try {
+          ret = gates[i].fn(battleValue, true);
+        } catch (eCall) {
+          thrown = (eCall && eCall.message) ? String(eCall.message) : String(eCall);
+        }
+        var tips = (window.__xyzwSimTips || []).slice();
+        var shown = ret;
+        if (shown !== null && typeof shown === 'object') {
+          try { shown = JSON.stringify(shown); } catch (eO) { shown = String(shown); }
+        }
+        var call = {
+          name: gates[i].name,
+          ret: thrown ? ('throw:' + thrown) : shown,
+          tips: tips,
+          src: gates[i].src
+        };
+        report.calls.push(call);
+        var tipHit = false;
+        for (var t = 0; t < tips.length; t++) {
+          if (/客户端数据异常|官方最新客户端|C_Battle_Tips/.test(tips[t])) tipHit = true;
+        }
+        if (tipHit) {
+          report.anomaly = true;
+          break;
+        }
+      }
+      if (!report.anomaly) {
+        report.reason = bt
+          ? '已调用盐场关口，没有返回「客户端数据异常」。'
+          : '已调用盐场关口，没有返回「客户端数据异常」。未找到盐场战斗类型，参数用了 0。';
+      }
+    } finally {
+      window.__xyzwSimRaw = false;
+      window.__xyzwSimTips = [];
+      try { setReject(false); } catch (eR) {}
+      restoreLowerGetter(cinst);
+      try { patchHortorSwitches(); } catch (eP) {}
+    }
+    try {
+      console.log('[咸强之王][SALT_SIM]', JSON.stringify(report));
+      post({
+        type: 'pvpDiag',
+        level: report.anomaly ? 'W' : 'I',
+        event: 'SALT_SIM',
+        message: report.anomaly ? 'anomaly' : 'no-anomaly',
+        summary: report
+      });
+    } catch (eLog) {}
+    return report;
+  };
   function tick(n){
     forceRejectOff();
     syncCodeVersion();
@@ -850,7 +1088,6 @@ class InjectScripts {
     if (n === 0 || n === 5 || n === 15 || n === 30 || n % 20 === 0) {
       snapshot('tick_'+n);
     }
-    if (n === 20 || n === 60) simulateSaltGate('tick_'+n);
     if (n < 120) setTimeout(function(){ tick(n + 1); }, n < 20 ? 500 : 2000);
   }
   forceRejectOff();
